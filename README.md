@@ -1,1 +1,1 @@
-Agentic RTL generation and verification
+Agentic RTL generation and verification using LangGraph
