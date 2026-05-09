@@ -24,11 +24,9 @@ from pipeline.nodes.stage1 import stage1_node
 from pipeline.nodes.stage3 import stage3_node
 from pipeline.state import PipelineState
 
-# ---------------------------------------------------------------------------
 # Hardcoded Stage 2 artifact for a D flip-flop.
 # This bridges the gap while Stage 2 is still a stub locked to counter.
 # The bsv_mapping fields are what Stage 3 uses to generate Verilog.
-# ---------------------------------------------------------------------------
 
 _DFF_PLUSCAL = """\
 ---- MODULE DFFImpl ----
@@ -109,10 +107,7 @@ def _write_dff_stage2(artifacts_dir: Path, run_id: str) -> None:
     print(f"  [setup] Wrote 02_pluscal_impl.json (handcrafted D-FF Stage 2 artifact)")
 
 
-# ---------------------------------------------------------------------------
 # Test runner
-# ---------------------------------------------------------------------------
-
 def run_test() -> None:
     run_id = str(uuid.uuid4())
     artifacts_dir = Path("artifacts") / run_id
@@ -214,10 +209,7 @@ def run_test() -> None:
     print(f"{'='*60}\n")
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
 def _assert_artifact(path: Path, stage: str) -> None:
     assert path.exists(), f"{stage} did not write {path}"
     data = json.loads(path.read_text())
