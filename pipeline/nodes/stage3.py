@@ -40,10 +40,7 @@ from pipeline.state import PipelineState
 
 MAX_RETRIES = 2  # 1 original attempt + 1 lint-error retry
 
-# ---------------------------------------------------------------------------
 # System prompt (large, reused across retries → gets prompt-cached)
-# ---------------------------------------------------------------------------
-
 _SYSTEM_PROMPT = textwrap.dedent("""\
     You are an expert RTL engineer who generates synthesizable Verilog from
     PlusCal / BSV-annotated hardware specifications.
@@ -107,14 +104,8 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     - Additional ports from the design spec
 """)
 
-# ---------------------------------------------------------------------------
 # Prompt builders
-# ---------------------------------------------------------------------------
-
-def _build_user_prompt(
-    impl: PlusCalImpl,
-    lint_errors: list[str] | None = None,
-) -> str:
+def _build_user_prompt(impl: PlusCalImpl, lint_errors: list[str] | None = None,) -> str:
     pluscal_text = ""
     try:
         pluscal_text = Path(impl.pluscal_path).read_text()
@@ -169,10 +160,7 @@ def _build_user_prompt(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Lint helpers
-# ---------------------------------------------------------------------------
-
 def _detect_lint_tool() -> Optional[str]:
     if shutil.which("verilator"):
         return "verilator"
@@ -220,10 +208,7 @@ def _run_lint(verilog_content: str, top_module: str, lint_tool: str) -> tuple[bo
             pass
 
 
-# ---------------------------------------------------------------------------
 # Response parser
-# ---------------------------------------------------------------------------
-
 def _parse_response(raw: str) -> dict:
     raw = raw.strip()
     fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
@@ -232,10 +217,7 @@ def _parse_response(raw: str) -> dict:
     return json.loads(raw)
 
 
-# ---------------------------------------------------------------------------
 # Node entry point
-# ---------------------------------------------------------------------------
-
 def stage3_node(state: PipelineState) -> PipelineState:
     run_id = state["run_id"]
     retry_counts = dict(state.get("retry_counts", {}))
@@ -389,10 +371,7 @@ def stage3_node(state: PipelineState) -> PipelineState:
     return {**state, "retry_counts": retry_counts, "halt": False}
 
 
-# ---------------------------------------------------------------------------
 # Failure helper
-# ---------------------------------------------------------------------------
-
 def _write_failure(
     state: PipelineState,
     output_path: Path,

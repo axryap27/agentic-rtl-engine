@@ -133,10 +133,7 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     populate the constraint lists.  If none are mentioned, return empty lists.
 """)
 
-# ---------------------------------------------------------------------------
 # Prompt builder
-# ---------------------------------------------------------------------------
-
 def _build_user_prompt(nl_spec: NLSpec, error_log: list[str] | None = None) -> str:
     lines = [
         f"Design name: {nl_spec.design_name}",
