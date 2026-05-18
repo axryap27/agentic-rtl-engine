@@ -1,0 +1,187 @@
+digraph FeasibleArchitecture {
+    // Global graph settings
+    rankdir=LR;
+    bgcolor="white";
+    labelloc="t";
+    label=<<b><font point-size="22">Agentic RTL Engine — Feasible 3-Week Architecture</font></b>>;
+    fontname="Helvetica";
+    fontsize=22;
+    nodesep=0.35;
+    ranksep=0.55;
+    splines=true;
+    compound=true;
+    pad=0.4;
+
+    // Default node style
+    node [
+        fontname="Helvetica",
+        fontsize=11,
+        style="rounded,filled",
+        shape=box,
+        fillcolor="white",
+        color="#333333",
+        penwidth=1.2,
+        margin="0.16,0.10"
+    ];
+
+    // Default edge style
+    edge [
+        fontname="Helvetica",
+        fontsize=10,
+        color="#222222",
+        arrowsize=0.8,
+        penwidth=1.2
+    ];
+
+    //========================================================================
+    // Boundary artifacts (shaded rectangles, cylinder-like)
+    //========================================================================
+    node [shape=cylinder, fillcolor="#ECECEC", color="#555555", style="filled", fontname="Helvetica", fontsize=11];
+
+    nl_spec      [label="NL Spec"];
+    tla_spec     [label="TLA+\nFormal Spec"];
+    pluscal      [label="Verified\nPlusCal Impl"];
+    verilog      [label="Synthesizable\nVerilog"];
+    eval_report  [label="Evaluation\nReport"];
+
+    // Reset to box style for subsequent nodes
+    node [shape=box, style="rounded,filled", fillcolor="white", color="#333333"];
+
+    //========================================================================
+    // STAGE 1 — Formalization (light blue)
+    //========================================================================
+    subgraph cluster_stage1 {
+        label=<<b>Stage 1 — Formalization</b>>;
+        style="rounded,filled";
+        fillcolor="#DCE9F7";   // light blue
+        color="#5B8BC1";
+        penwidth=1.3;
+        fontname="Helvetica";
+        fontsize=13;
+        labelloc="t";
+        labeljust="l";
+        margin=14;
+
+        s1_claude   [label="Claude\n(TLA+ Generation)", fillcolor="#FFFFFF"];
+        s1_sany     [label="tla2sany\n(Syntax Check)", fillcolor="#FFFFFF"];
+        s1_tlc      [label="TLC\n(Invariant\nModel Check)", fillcolor="#FFFFFF"];
+
+        // forward flow inside cluster
+        s1_claude -> s1_sany;
+        s1_sany   -> s1_tlc;
+
+        // dashed retry loop inside cluster
+        s1_tlc -> s1_claude [
+            style="dashed",
+            color="#777777",
+            fontcolor="#555555",
+            label=<<i>counterexample / syntax error</i>>,
+            constraint=false,
+            arrowsize=0.7
+        ];
+    }
+
+    //========================================================================
+    // STAGE 2 — Verified Refinement (light green)
+    //========================================================================
+    subgraph cluster_stage2 {
+        label=<<b>Stage 2 — Verified Refinement</b>>;
+        style="rounded,filled";
+        fillcolor="#DDEFD9";   // light green
+        color="#6FA864";
+        penwidth=1.3;
+        fontname="Helvetica";
+        fontsize=13;
+        labelloc="t";
+        labeljust="l";
+        margin=14;
+
+        s2_claude   [label="Claude\n(PlusCal Generation)", fillcolor="#FFFFFF"];
+        s2_pcal     [label="pcal.trans\n(PlusCal -> TLA+\nTranslator)", fillcolor="#FFFFFF"];
+        s2_tlc      [label="TLC\n(Refinement Check\nvia INSTANCE)", fillcolor="#FFFFFF"];
+
+        s2_claude -> s2_pcal;
+        s2_pcal   -> s2_tlc;
+
+        s2_tlc -> s2_claude [
+            style="dashed",
+            color="#777777",
+            fontcolor="#555555",
+            label=<<i>refinement counterexample</i>>,
+            constraint=false,
+            arrowsize=0.7
+        ];
+    }
+
+    //========================================================================
+    // STAGE 3 — Codegen (light yellow)
+    //========================================================================
+    subgraph cluster_stage3 {
+        label=<<b>Stage 3 — Codegen</b>>;
+        style="rounded,filled";
+        fillcolor="#FBF1C8";   // light yellow
+        color="#C9A227";
+        penwidth=1.3;
+        fontname="Helvetica";
+        fontsize=13;
+        labelloc="t";
+        labeljust="l";
+        margin=14;
+
+        s3_claude    [label="Claude\n(Verilog Generation)", fillcolor="#FFFFFF"];
+        s3_verilator [label="Verilator\n(Lint)", fillcolor="#FFFFFF"];
+        s3_iverilog  [label="iverilog\n(Simulation,\nauto-testbench)", fillcolor="#FFFFFF"];
+
+        s3_claude    -> s3_verilator;
+        s3_verilator -> s3_iverilog;
+
+        s3_iverilog -> s3_claude [
+            style="dashed",
+            color="#777777",
+            fontcolor="#555555",
+            label=<<i>lint / sim errors</i>>,
+            constraint=false,
+            arrowsize=0.7
+        ];
+    }
+
+    //========================================================================
+    // STAGE 4 — Evaluation (light pink)
+    //========================================================================
+    subgraph cluster_stage4 {
+        label=<<b>Stage 4 — Evaluation</b>>;
+        style="rounded,filled";
+        fillcolor="#F9D9E2";   // light pink
+        color="#C26F8E";
+        penwidth=1.3;
+        fontname="Helvetica";
+        fontsize=13;
+        labelloc="t";
+        labeljust="l";
+        margin=14;
+
+        s4_yosys   [label="Yosys\n(Synthesis:\narea, FF count,\ncritical path)", fillcolor="#FFFFFF"];
+        s4_veval   [label="VerilogEval\n(Functional\nBenchmark)", fillcolor="#FFFFFF"];
+        s4_claude  [label="Claude\n(Demo Summary)", fillcolor="#FFFFFF"];
+
+        s4_yosys -> s4_veval;
+        s4_veval -> s4_claude;
+    }
+
+    //========================================================================
+    // Inter-stage forward flow (boundary artifacts)
+    //========================================================================
+    nl_spec   -> s1_claude    [lhead=cluster_stage1];
+    s1_tlc    -> tla_spec     [ltail=cluster_stage1];
+    tla_spec  -> s2_claude    [lhead=cluster_stage2];
+    s2_tlc    -> pluscal      [ltail=cluster_stage2];
+    pluscal   -> s3_claude    [lhead=cluster_stage3];
+    s3_iverilog -> verilog    [ltail=cluster_stage3];
+    verilog   -> s4_yosys     [lhead=cluster_stage4];
+    s4_claude -> eval_report  [ltail=cluster_stage4];
+
+    //========================================================================
+    // Ordering hints to keep boundary artifacts horizontally aligned
+    //========================================================================
+    { rank=same; nl_spec; tla_spec; pluscal; verilog; eval_report; }
+}
