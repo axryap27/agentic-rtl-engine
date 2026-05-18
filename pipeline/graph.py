@@ -33,10 +33,7 @@ from pipeline.nodes.stage4 import stage4_node
 from pipeline.state import PipelineState
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
 def _artifact_status(run_id: str, filename: str) -> str:
     """Read the ``status`` field from an artifact JSON; return 'missing' if unreadable."""
     try:
@@ -57,10 +54,8 @@ def _lint_passed(run_id: str) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
 # Router functions
 # Each router receives the full state and returns a node name (string) or END.
-# ---------------------------------------------------------------------------
 
 def _route_after_stage1(state: PipelineState) -> str:
     if state.get("halt"):
@@ -103,10 +98,7 @@ def _route_after_stage4(state: PipelineState) -> str:
     return END
 
 
-# ---------------------------------------------------------------------------
 # Graph builder
-# ---------------------------------------------------------------------------
-
 def build_graph():
     workflow = StateGraph(PipelineState)
 
