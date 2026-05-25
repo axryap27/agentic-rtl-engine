@@ -90,14 +90,14 @@ Natural language prompt
 
 ## Components
 
-| Component | Owner (see [TODO.md](./TODO.md)) | Responsibility |
-|-----------|----------------------------------|----------------|
-| **Agent 1** | Mike | NL prompt → JSON(S) |
-| **Agent 2** | Terry | JSON(S) → cocotb testbench + harness setup |
-| **Agent 3** | Mike | JSON(S) → JSON(TLA); revise JSON(TLA) from TLC or testbench failures |
-| **Compiler 1** | Satviki | JSON(TLA) → TLA+ |
-| **Compiler 2** | Satviki | RTL-style TLA+ → SystemVerilog |
-| **Pipeline coordination** | — | LangGraph graph, routing, retries, artifact paths |
+| Component | Responsibility |
+|-----------|----------------|
+| **Agent 1** | NL prompt → JSON(S) |
+| **Agent 2** | JSON(S) → cocotb testbench + harness setup |
+| **Agent 3** | JSON(S) → JSON(TLA); revise JSON(TLA) from TLC or testbench failures |
+| **Compiler 1** | JSON(TLA) → TLA+ |
+| **Compiler 2** | RTL-style TLA+ → SystemVerilog |
+| **Pipeline coordination** | LangGraph graph, routing, retries, artifact paths |
 
 ---
 
