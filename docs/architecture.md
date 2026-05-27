@@ -29,7 +29,7 @@ Natural language prompt
    Agent 3 ──► JSON(TLA)          Agent 2 ──► cocotb testbench (.py)
         │                              │
         ▼                              │
- Compiler 1 ──► TLA+ ──► TLC          │
+ Compiler 1 ──► TLA+ ──► TLC           │
         │ (retry on TLC errors)        │
         ▼                              │
  RTL-style TLA+ (templates)            │
