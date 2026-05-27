@@ -2,3 +2,8 @@ artifacts/
 __pycache__/
 *.pyc
 .venv/
+
+# Local environment / credentials — NEVER commit
+.env
+.env.local
+.env.*.local

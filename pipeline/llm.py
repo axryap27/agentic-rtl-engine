@@ -1,47 +1,65 @@
-"""Shared Anthropic client factory and prompt-cached call helper.
+"""Shared LLM client and call helper.
+
+Uses an OpenAI-compatible API.  The proxy at LLM_BASE_URL routes to the
+underlying provider (Anthropic / Google / etc.) based on the model name.
+
+Credentials are loaded from a gitignored .env file via python-dotenv.
+
+Environment variables
+---------------------
+    LLM_BASE_URL  – OpenAI-compatible base URL (e.g. the proxy or
+                    https://api.anthropic.com/v1)
+    LLM_API_KEY   – Bearer key for the proxy / provider
+    LLM_MODEL     – Default model identifier (e.g. anthropic/claude-sonnet-latest)
 
 Usage
 -----
     from pipeline.llm import call_claude
 
-    response_text = call_claude(
-        system="You are a hardware design expert ...",  # cached
+    text = call_claude(
+        system="You are a hardware design expert ...",
         user="Generate a TLA+ spec for ...",
     )
 
-The system prompt is automatically wrapped with cache_control so large,
-reused prompts hit Anthropic's prompt cache on subsequent calls within
-the same TTL window (5 minutes by default).
-
-Model
------
-    claude-sonnet-4-6  (hard-coded; change MODEL constant if needed)
+The function name `call_claude` is kept for backwards compatibility with the
+existing pipeline nodes — under the hood it uses the OpenAI SDK and works
+with any model the proxy exposes (override with the `model=` kwarg).
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
-import anthropic
+from dotenv import load_dotenv
+from openai import OpenAI
 
-MODEL = "claude-sonnet-4-6"
+# Load .env from the project root (one level above this file).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
-# Module-level singleton — constructed once per process.  The SDK is
-# thread-safe so sharing across nodes is fine.
-_client: anthropic.Anthropic | None = None
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-latest")
+
+_client: Optional[OpenAI] = None
 
 
-def get_client() -> anthropic.Anthropic:
-    """Return (or lazily create) the shared Anthropic client."""
+def get_client() -> OpenAI:
+    """Return (or lazily create) the shared OpenAI-compatible client."""
     global _client
     if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("LLM_API_KEY")
+        base_url = os.environ.get("LLM_BASE_URL")
         if not api_key:
             raise EnvironmentError(
-                "ANTHROPIC_API_KEY environment variable is not set."
+                "LLM_API_KEY is not set.  Copy .env.example to .env and fill it in, "
+                "or export the variable in your shell."
             )
-        _client = anthropic.Anthropic(api_key=api_key)
+        if not base_url:
+            raise EnvironmentError(
+                "LLM_BASE_URL is not set.  See .env.example."
+            )
+        _client = OpenAI(api_key=api_key, base_url=base_url)
     return _client
 
 
@@ -51,65 +69,53 @@ def call_claude(
     user: str,
     max_tokens: int = 4096,
     temperature: float = 0.0,
-    extra_messages: list[dict[str, Any]] | None = None,
+    model: Optional[str] = None,
+    extra_messages: Optional[list[dict[str, Any]]] = None,
 ) -> str:
-    """Call Claude with prompt caching on the system prompt.
+    """Call the configured LLM and return the assistant's text response.
 
     Parameters
     ----------
     system:
-        The system prompt.  It will be sent with ``cache_control`` so that
-        repeated calls with the same system text benefit from Anthropic's
-        prompt cache (cache TTL is 5 minutes for Sonnet).
+        System prompt.  Large reused prompts benefit from any caching the
+        upstream proxy/provider supports.
     user:
-        The user turn content.
+        Final user message.
     max_tokens:
-        Maximum tokens in the assistant reply.
+        Cap on assistant tokens.
     temperature:
-        Sampling temperature (0.0 for deterministic output).
+        0.0 for deterministic generation (default for code/spec output).
+    model:
+        Override the default model.  Examples:
+            "anthropic/claude-sonnet-latest"
+            "google/gemini-pro-latest"
     extra_messages:
-        Optional list of additional message dicts to prepend before the
-        final user turn (useful for injecting prior assistant drafts or
-        lint error context).
+        Optional messages to prepend before the final user turn (e.g. prior
+        assistant attempts, lint error context).
 
     Returns
     -------
     str
-        The text of the first content block in the assistant response.
+        The text content of the assistant's response.
     """
     client = get_client()
 
-    # Build message list.
-    messages: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     if extra_messages:
         messages.extend(extra_messages)
     messages.append({"role": "user", "content": user})
 
-    # System prompt with cache_control on the last text block so the full
-    # system text is eligible for caching.
-    system_blocks: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": system,
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-
-    response = client.messages.create(
-        model=MODEL,
+    response = client.chat.completions.create(
+        model=model or DEFAULT_MODEL,
         max_tokens=max_tokens,
         temperature=temperature,
-        system=system_blocks,
         messages=messages,
     )
 
-    # Extract text from the first content block.
-    for block in response.content:
-        if hasattr(block, "text"):
-            return block.text
-
-    raise ValueError(
-        f"Claude returned no text content block. "
-        f"Stop reason: {response.stop_reason!r}, "
-        f"content types: {[type(b).__name__ for b in response.content]}"
-    )
+    choice = response.choices[0]
+    content = choice.message.content
+    if content is None:
+        raise ValueError(
+            f"LLM returned no text content. finish_reason={choice.finish_reason!r}"
+        )
+    return content
