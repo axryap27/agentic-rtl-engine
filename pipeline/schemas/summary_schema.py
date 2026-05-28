@@ -1,10 +1,10 @@
-from pydantic import BaseModel
-from typing import Any
-
 # JSON(Summary) schema:
 # 
 # Description: the design spec interpretation of the user's natural language prompt.
 # Produced by Agent 1. Use SpecSummary.model_validate(data) to validate a loaded JSON(S) dict.
+
+from pydantic import BaseModel
+from typing import Any
 
 
 class Port(BaseModel):
