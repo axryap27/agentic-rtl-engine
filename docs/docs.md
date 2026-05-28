@@ -58,7 +58,7 @@ Also extracts non-functional requirements (timing, area, power constraints) for 
 
 ### 2. Stepwise Refinement
 
-Progressively refines the TLA+ spec toward a concrete implementation through a sequence of verified steps. Each intermediate version is a mixture of specification and implementation.
+Progressively refines the TLA+ spec toward a concrete implementation through a sequence of verified steps. Each intermediate version is a mixture of specification and implementation. 
 
 **Key concepts:**
 
