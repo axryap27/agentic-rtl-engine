@@ -26,3 +26,5 @@ class SpecSummary(BaseModel):
     description: str          # plain-English behavior, used by Agent 3
     ports: list[Port]
     test_vectors: list[TestVector]
+    reset_port: str | None = None   # name of the reset port if one exists (e.g. "rst"); None if the design has no reset
+    reset_active_low: bool = False  # True if reset is active-low (asserted at 0)
