@@ -2,8 +2,11 @@ artifacts/
 __pycache__/
 *.pyc
 .venv/
+TLA_specs.png
+system_architecture.png
 
 # Local environment / credentials — NEVER commit
 .env
 .env.local
 .env.*.local
+
