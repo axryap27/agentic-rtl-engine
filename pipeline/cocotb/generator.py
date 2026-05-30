@@ -1,6 +1,8 @@
 from pathlib import Path  # Path is an object for file paths; Path("a/b.py").write_text(...) writes a file
 from pipeline.schemas.summary_schema import SpecSummary
 
+#generator.py: generates cocotb testbench from JSON(S) test vectors
+
 # Fixed boilerplate for every testbench.
 # {module_name}, {reset_block}, {test_vectors} are placeholders filled in by generate_testbench().
 _TEMPLATE = """\
