@@ -27,7 +27,7 @@ class Transition(BaseModel):
 class FormalSpec(BaseModel):
     module_name: str
     description: str
-    variables: dict[str, Variable]      # variable name → type info
-    initial: dict[str, str]             # variable name → initial value expression
+    variables: dict[str, Variable]      # variable name -> type info
+    initial: dict[str, str]             # variable name -> initial value expression
     transitions: list[Transition]
     invariants: list[str]               # TLA+ invariant expressions; all must hold in every state
