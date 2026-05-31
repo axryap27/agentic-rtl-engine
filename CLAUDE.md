@@ -46,11 +46,11 @@ See `docs/refinement_rules.md` for the formal definitions and `docs/architecture
 
 ---
 
-## LLM clients (two transports)
+## LLM clients (two transports today; a third agent is planned)
 
-The pipeline has 3 LLM-using runtime agents — Agent 1, Agent 2, Agent 3 — split across two transports:
+The pipeline has **2 LLM-using runtime agents** today — Agent 1 and Agent 3 — split across two transports. A planned end-of-pipeline diagnoser agent (see `docs/handoff_runtime_agents.md` §8) would make it 3 when built. Agent 2's original role is now a deterministic templated generator at `pipeline/cocotb/generator.py` — no LLM.
 
-**Agent 1 and Agent 2** — OpenAI-compatible SDK (`openai` package) via the proxy. One-shot structured-output calls, no tools, no loop:
+**Agent 1** — OpenAI-compatible SDK (`openai` package) via the proxy. One-shot structured-output call, no tools, no loop:
 
 ```python
 import openai, os
