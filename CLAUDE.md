@@ -46,9 +46,11 @@ See `docs/refinement_rules.md` for the formal definitions and `docs/architecture
 
 ---
 
-## LLM client
+## LLM clients (two transports)
 
-Use the **OpenAI-compatible SDK** (`openai` package), not the `anthropic` SDK. The proxy is configured via environment variables:
+The pipeline has 3 LLM-using runtime agents — Agent 1, Agent 2, Agent 3 — split across two transports:
+
+**Agent 1 and Agent 2** — OpenAI-compatible SDK (`openai` package) via the proxy. One-shot structured-output calls, no tools, no loop:
 
 ```python
 import openai, os
@@ -59,7 +61,17 @@ client = openai.OpenAI(
 model = os.environ["LLM_MODEL"]
 ```
 
-Always use `temperature=0.0` for code and spec generation. Always use `response_format={"type": "json_object"}` when expecting structured output. System prompts are intentionally reused across retries for prompt caching — do not regenerate them per call.
+**Agent 3** — Claude Agent SDK direct to Anthropic. Tool-using; the SDK does NOT route through the proxy:
+
+```python
+import os
+from claude_agent_sdk import ClaudeAgentClient   # exact import depends on SDK version
+client = ClaudeAgentClient(api_key=os.environ["ANTHROPIC_API_KEY"])
+```
+
+Agent 3 has four entry points sharing one persona / system prompt: `generate_formal_spec`, `revise_on_tlc`, `pick_rule`, `revise_on_cocotb`. **Critical:** `pick_rule` runs with `tools=[]` (empty tool surface) to preserve the bounded-action-space invariant — see `docs/handoff_runtime_agents.md` §5. Its return shape is exactly `{"rule_name": str, "params": dict}`.
+
+For all clients: `temperature=0.0`, structured-output mode when expecting JSON, system prompts reused across retries for prompt caching — do not regenerate them per call.
 
 ---
 
@@ -114,7 +126,7 @@ verilator --lint-only artifacts/<run_id>/output.v
 iverilog -Wall -t null artifacts/<run_id>/output.v
 ```
 
-Copy `.env.example` to `.env` and fill in `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` before running.
+Copy `.env.example` to `.env` and fill in `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` (for Agent 1 + Agent 2 via the proxy) and `ANTHROPIC_API_KEY` (for Agent 3 via Claude Agent SDK direct) before running.
 
 ---
 
