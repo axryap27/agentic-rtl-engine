@@ -50,6 +50,10 @@ class Iteration(RefinementRule):
         for var in result.get("variables", []):
             if var["name"] in clocked_vars:
                 var["clocked"] = True
+                # A variable that has entered a clock domain is concrete
+                # hardware storage (a register). Mark it non-abstract so that
+                # the RTL-style termination predicate can recognise it.
+                var["abstract"] = False
 
         return result
 
