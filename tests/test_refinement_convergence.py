@@ -25,9 +25,7 @@ import json
 import pathlib
 import sys
 
-# ---------------------------------------------------------------------------
 # Ensure the project root is on sys.path when run directly.
-# ---------------------------------------------------------------------------
 _ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
@@ -42,14 +40,12 @@ from pipeline.refinement.engine import (
     verify_rule_purity,
 )
 
-# ---------------------------------------------------------------------------
 # 2-bit counter — abstract starting spec
 #
 # This mirrors what Agent 3 / Compiler 1 would produce before refinement:
 # - One abstract variable "count" with no reset and no clocked binding.
 # - One abstract action "Count" with no explicit update, no clock, no branches.
 # - No reset action yet.
-# ---------------------------------------------------------------------------
 
 COUNTER_INITIAL_SPEC: dict = {
     "variables": [
@@ -78,7 +74,6 @@ COUNTER_INITIAL_SPEC: dict = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Deterministic stub pick_rule
 #
 # Policy: always pick the first rule in the ordered preferred list that is
@@ -96,7 +91,6 @@ COUNTER_INITIAL_SPEC: dict = {
 #   Step 2: Iteration     — mark "Count" as clocked.
 #   (After step 2, count is reset+concrete+typed, Count is clocked+updated
 #    -> is_rtl_style() should be True.)
-# ---------------------------------------------------------------------------
 
 _STEP_SEQUENCE: list[tuple[str, dict]] = [
     (
@@ -149,9 +143,7 @@ def _stub_pick_rule(applicable_rules: list[dict], spec: dict) -> dict:
     return {"rule_name": fallback["name"], "params": {}}
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 
 def test_purity_of_all_rules() -> None:
     """Verify every Tier-1 rule's apply() is pure (double-call identity)."""
@@ -423,9 +415,7 @@ def test_is_rtl_style_predicate() -> None:
     print("is_rtl_style predicate tests passed.")
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("=" * 60)

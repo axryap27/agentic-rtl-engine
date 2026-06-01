@@ -29,9 +29,9 @@ from pipeline.compilers.compiler1 import (
 )
 
 
-# ---------------------------------------------------------------------------
+# 
 # Compiler 1 tests
-# ---------------------------------------------------------------------------
+# 
 
 
 def test_compiler1_produces_tla_and_cfg():
@@ -139,9 +139,7 @@ def test_compiler1_invalid_module_name_raises():
         assert "module_name" in str(e)
 
 
-# ---------------------------------------------------------------------------
 # Compiler 2: banlist verifier tests
-# ---------------------------------------------------------------------------
 
 
 def test_banlist_clean_verilog_passes():
@@ -249,9 +247,7 @@ def test_banlist_no_false_positive_on_docstring_header():
     verify_banlist(verilog)
 
 
-# ---------------------------------------------------------------------------
 # Compiler 2: emitter correctness tests
-# ---------------------------------------------------------------------------
 
 
 def test_compiler2_produces_verilog_2001_always_posedge():
@@ -328,9 +324,7 @@ def test_compiler2_no_logic_keyword_in_output():
     assert not re.search(r"\blogic\b", stripped), "Found 'logic' in emitted code"
 
 
-# ---------------------------------------------------------------------------
 # Compiler 2: lint tests (iverilog / verilator)
-# ---------------------------------------------------------------------------
 
 
 def _run_linter(verilog_src: str) -> tuple[int, str]:
@@ -404,9 +398,7 @@ Spec == Init /\ [][Next]_vars
     assert rc == 0, f"Counter lint failed:\n{out}\n\nVerilog:\n{verilog}"
 
 
-# ---------------------------------------------------------------------------
 # CLI self-test
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     tests = [

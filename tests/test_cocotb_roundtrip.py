@@ -23,9 +23,7 @@ from pipeline.cocotb.runner import run_testbench
 from pipeline.schemas.summary_schema import SpecSummary, TestVector
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _make_counter_summary() -> SpecSummary:
     """2-bit free-running counter with active-high synchronous reset.
@@ -54,9 +52,7 @@ def _make_counter_summary() -> SpecSummary:
     )
 
 
-# ---------------------------------------------------------------------------
 # Known-good RTL
-# ---------------------------------------------------------------------------
 
 _GOOD_COUNTER_V = """\
 `timescale 1ns/1ps
@@ -105,9 +101,7 @@ endmodule
 """
 
 
-# ---------------------------------------------------------------------------
 # Test cases
-# ---------------------------------------------------------------------------
 
 def _run_tests() -> None:
     summary = _make_counter_summary()
@@ -115,9 +109,7 @@ def _run_tests() -> None:
     with tempfile.TemporaryDirectory(prefix="cocotb_roundtrip_") as tmpdir:
         tmp = Path(tmpdir)
 
-        # ----------------------------------------------------------------
         # 1. Generator produces syntactically valid Python.
-        # ----------------------------------------------------------------
         tb_path = tmp / "test_counter.py"
         generate_testbench(summary, tb_path)
 
@@ -135,9 +127,7 @@ def _run_tests() -> None:
         print(src)
         print("---------------------------")
 
-        # ----------------------------------------------------------------
         # 2. Runner passes on known-good RTL.
-        # ----------------------------------------------------------------
         good_v = tmp / "counter_good.v"
         good_v.write_text(_GOOD_COUNTER_V)
 
@@ -155,9 +145,7 @@ def _run_tests() -> None:
         )
         print("PASS  test 2 — runner returns pass on good RTL")
 
-        # ----------------------------------------------------------------
         # 3. Runner returns structured fail (phase=test) on mutant RTL.
-        # ----------------------------------------------------------------
         bad_v = tmp / "counter_bad.v"
         bad_v.write_text(_BAD_COUNTER_V)
 
@@ -184,9 +172,7 @@ def _run_tests() -> None:
         )
         print("PASS  test 3 — runner returns structured phase=test fail on mutant RTL")
 
-        # ----------------------------------------------------------------
         # 4. Runner returns structured fail (phase=build) on invalid Verilog.
-        # ----------------------------------------------------------------
         invalid_v = tmp / "counter_invalid.v"
         invalid_v.write_text(_INVALID_COUNTER_V)
 
