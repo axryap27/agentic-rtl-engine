@@ -7,6 +7,8 @@
 # Conditions and update expressions use plain English boolean operators (AND, OR, NOT)
 # so Agent 3 can generate them reliably. Compiler 1 translates to TLA+ syntax (/\, \/, ~).
 
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -31,3 +33,4 @@ class FormalSpec(BaseModel):
     initial: dict[str, str]             # variable name -> initial value expression
     transitions: list[Transition]
     invariants: list[str]               # TLA+ invariant expressions; all must hold in every state
+    raw_tla: Optional[str] = None       # if set, Compiler 1 passes this through verbatim instead of templating
