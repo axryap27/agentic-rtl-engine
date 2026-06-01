@@ -232,6 +232,10 @@ def run(
     pick_rule: Callable[[list[dict], dict], dict],
     *,
     run_id: str = "default",
+    tlc_check: Callable[[dict], bool] | None = None,
+    allowed_rule_names: set[str] | None = None,
+    termination_check: Callable[[dict], bool] = is_rtl_style,
+    max_steps: int = MAX_STEPS,
 ) -> dict:
     """
     Drive the refinement loop until the spec reaches RTL-style.
@@ -251,6 +255,20 @@ def run(
     run_id:
         Identifies the artifact directory (artifacts/<run_id>/). Defaults to
         "default" for testing.
+    tlc_check:
+        Optional callable invoked after each rule application. Receives the
+        candidate new spec and returns True if TLC accepts it. If False, the
+        choice is excluded and the engine backtracks. Permissive on errors
+        (exceptions inside the callback should return True to avoid blocking).
+    allowed_rule_names:
+        Optional set of rule class names to consider. Rules not in this set are
+        filtered out before pick_rule is called. None means all rules allowed.
+    termination_check:
+        Callable that returns True when this engine pass is complete. Defaults
+        to is_rtl_style (global RTL-style termination). Per-pass termination
+        (e.g. "no allowed rules applicable") should be passed here.
+    max_steps:
+        Hard limit on rule-application steps. Raises RefinementStall if hit.
 
     Returns
     -------
@@ -283,8 +301,8 @@ def run(
 
     total_steps = 0
 
-    while not is_rtl_style(spec):
-        if total_steps >= MAX_STEPS:
+    while not termination_check(spec):
+        if total_steps >= max_steps:
             raise RefinementStall(
                 f"Refinement exceeded {MAX_STEPS} steps without reaching "
                 f"RTL-style. This likely indicates a pick_rule that cycles. "
@@ -292,16 +310,21 @@ def run(
             )
         total_steps += 1
 
-        # --- Filter applicable rules ---
+        # --- Filter applicable rules (by is_applicable and allowed set) ---
         applicable: list[RefinementRule] = [
-            r for r in RULE_REGISTRY if r.is_applicable(spec)
+            r for r in RULE_REGISTRY
+            if r.is_applicable(spec)
+            and (allowed_rule_names is None or r.__class__.__name__ in allowed_rule_names)
         ]
 
         depth = len(chain)
         excluded_here: set[tuple[str, str]] = excluded_at.get(depth, set())
 
         if not applicable:
-            # No rule can fire AND not RTL-style -> must backtrack
+            # No allowed rule can fire. If termination_check now agrees, exit
+            # cleanly rather than backtracking (this pass is done).
+            if termination_check(spec):
+                break
             spec, chain = _backtrack(
                 formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
             )
@@ -356,6 +379,11 @@ def run(
             continue
 
         post_hash = _spec_hash(new_spec)
+
+        # --- TLC gate: verify the candidate spec before committing ---
+        if tlc_check is not None and not tlc_check(new_spec):
+            excluded_at.setdefault(depth, set()).add((rule_name, params_json))
+            continue
 
         # --- Append to chain and persist ---
         step = {

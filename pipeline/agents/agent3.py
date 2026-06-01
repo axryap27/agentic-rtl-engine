@@ -283,7 +283,7 @@ Return a single corrected JSON object matching the FormalSpec schema. No other t
     return FormalSpec.model_validate(data)
 
 
-def pick_rule(applicable_rules: list[dict], spec: dict) -> dict:
+def pick_rule(applicable_rules: list[dict], spec: dict, *, system_prompt: str | None = None) -> dict:
     """
     Choose which refinement rule to apply next.
 
@@ -327,7 +327,7 @@ No other text, no markdown. Return only the JSON object.
         model=_AGENT3_MODEL,
         max_tokens=512,
         temperature=0.0,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt if system_prompt is not None else _SYSTEM_PROMPT,
         tools=[],  # explicitly empty — bounded action space invariant
         messages=[{"role": "user", "content": user_message}],
     )
