@@ -1,5 +1,18 @@
 """
-RTL-style TLA+ to Verilog-2001 compiler.
+Compiler 2 — RTL-style TLA+ → Verilog-2001.
+
+This module is Compiler 2 in the agentic-rtl-engine pipeline.  It takes
+RTL-style TLA+ produced by the Refinement Engine (Stage 2 output,
+``02_pluscal_impl.json``) and emits synthesizable Verilog-2001.
+
+Public entry point
+------------------
+    compile_tla_to_verilog(tla_source: str, module_name: str) -> str
+
+The function raises ``BanlistViolation`` if the generated Verilog contains
+any SystemVerilog or non-synthesizable construct from the hard banlist.
+That check runs *before* the source is returned to the caller — nothing
+banned ever touches disk.
 
 Expected TLA+ input format
 --------------------------
@@ -50,16 +63,128 @@ TLA+ expression translations
 
 Output
 ------
-Synthesizable Verilog-2001 (no SystemVerilog keywords).
+Synthesizable Verilog-2001 only — no SystemVerilog constructs.
   - Full port list inferred from variable declarations and which blocks drive them
   - reg  for internal registers (r_* prefix) and output reg ports
   - wire for output wire ports and undeclared combinational signals
   - always @(posedge clk) for clocked blocks
+  - always @(*) for combinational blocks (not used currently; reserved)
+  - No logic, no always_ff / always_comb / always_latch, no initial in synth
+    modules, no #delay statements
 """
 
 import re
 import sys
 from typing import Optional
+
+
+
+# ---------------------------------------------------------------------------
+# Verilog-2001 banlist verifier
+# ---------------------------------------------------------------------------
+# Checks emitted Verilog *code* (not comments) for SystemVerilog and
+# non-synthesizable constructs.  Called by compile_tla_to_verilog() before
+# returning -- nothing banned ever leaves this module.
+#
+# Strategy: strip line comments (//...) and block comments (/*...*/) first,
+# then apply word-boundary or pattern checks on the stripped code only.
+# This avoids false positives from ban-words that appear in comment headers.
+
+
+class BanlistViolation(ValueError):
+    """Raised when emitted Verilog contains a banned construct."""
+
+
+# Each entry is (label, compiled_regex).  Regex applied to comment-stripped
+# source.  Word-boundary anchors prevent matching inside longer identifiers.
+_BANLIST: list[tuple[str, re.Pattern]] = [
+    ("'logic' (SystemVerilog keyword -- use reg/wire)",
+     re.compile(r"\blogic\b")),
+    ("'always_ff' (SystemVerilog -- use always @(posedge clk))",
+     re.compile(r"\balways_ff\b")),
+    ("'always_comb' (SystemVerilog -- use always @(*))",
+     re.compile(r"\balways_comb\b")),
+    ("'always_latch' (SystemVerilog)",
+     re.compile(r"\balways_latch\b")),
+    ("'interface' (SystemVerilog)",
+     re.compile(r"\binterface\b")),
+    ("'modport' (SystemVerilog)",
+     re.compile(r"\bmodport\b")),
+    ("'typedef' (SystemVerilog)",
+     re.compile(r"\btypedef\b")),
+    ("'initial' block (not allowed in synthesizable modules)",
+     re.compile(r"\binitial\b")),
+    ("#delay construct (not synthesizable)",
+     re.compile(r"#\s*\d")),
+    ("'$' system task (simulation only)",
+     re.compile(r"\$\w+")),
+]
+
+
+def _strip_comments(verilog: str) -> str:
+    """
+    Remove Verilog line comments (//) and block comments (/* ... */).
+
+    Preserves newlines so line numbers remain meaningful.
+    Does NOT handle string literals (none expected in synthesizable RTL).
+    """
+    # Remove block comments, preserving embedded newlines
+    result = re.sub(
+        r"/\*.*?\*/",
+        lambda m: "\n" * m.group(0).count("\n"),
+        verilog,
+        flags=re.DOTALL,
+    )
+    # Remove line comments
+    result = re.sub(r"//[^\n]*", "", result)
+    return result
+
+
+def verify_banlist(verilog: str) -> None:
+    """
+    Scan *verilog* for banned constructs (comment-stripped).
+
+    Raises BanlistViolation with a precise message on the first hit.
+    This is a build-time gate -- not an LLM retry.
+    """
+    code = _strip_comments(verilog)
+    for label, pattern in _BANLIST:
+        m = pattern.search(code)
+        if m:
+            token = m.group(0)
+            pre = verilog.find(token)
+            line_no = verilog[:pre].count("\n") + 1 if pre != -1 else "?"
+            raise BanlistViolation(
+                f"Banlist violation -- {label}\n"
+                f"  Matched: {token!r}  (approx. line {line_no} in emitted source)"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Public entry point (pinned signature)
+# ---------------------------------------------------------------------------
+
+def compile_tla_to_verilog(tla_source: str, module_name: str) -> str:
+    """
+    Compiler 2 public entry point.
+
+    Translate RTL-style TLA+ *tla_source* to a synthesizable Verilog-2001
+    string.  Runs the banlist verifier before returning; raises
+    BanlistViolation if any banned construct is found in the emitted code.
+
+    Args:
+        tla_source:  RTL-style TLA+ text (output of Refinement Engine).
+        module_name: Verilog module name for the emitted module.
+
+    Returns:
+        Synthesizable Verilog-2001 source as a string.
+
+    Raises:
+        BanlistViolation: if emitted code contains a banned construct.
+    """
+    verilog = RTLTLACompiler(tla_source).compile(module_name)
+    verify_banlist(verilog)
+    return verilog
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +239,7 @@ Init ==
 \* COMBINATIONAL LOGIC  →  assign statements
 \* ----------------------------------------------------------------
 CombinationalLogic ==
-    /\ in_ready'  = (r_stg1_valid = 0 \/ r_stg2_ready)
+    /\ in_ready'  = (r_stg1_valid = 0 \/ out_ready = 1)
     /\ out_valid' = r_stg2_valid
     /\ out_data'  = r_stg2_acc
 
@@ -237,8 +362,12 @@ class RTLTLACompiler:
     # ------------------------------------------------------------------
 
     def extract_variables(self) -> list[str]:
+        # Stop at the next TLA+ definition (word followed by ==), the module
+        # terminator (====), or end of string.  Do NOT stop on a bare word
+        # followed only by a newline -- that would prematurely truncate the
+        # VARIABLES block when the last variable name sits on its own line.
         m = re.search(
-            r"VARIABLES\s+([\s\S]*?)(?=\n\s*\w+\s*(?:==|\n)|\Z)",
+            r"VARIABLES\s+([\s\S]*?)(?=\n\s*\w+\s*==|\n={4,}|\Z)",
             self.tla_code,
         )
         if not m:
@@ -526,8 +655,8 @@ class RTLTLACompiler:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python compiler1.py <spec.tla> [module_name]", file=sys.stderr)
-        print("       python compiler1.py --sample", file=sys.stderr)
+        print("Usage: python compiler2.py <spec.tla> [module_name]", file=sys.stderr)
+        print("       python compiler2.py --sample", file=sys.stderr)
         sys.exit(1)
 
     if sys.argv[1] == "--sample":
