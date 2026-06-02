@@ -13,7 +13,8 @@ LangGraph orchestration for the agentic-rtl-engine pipeline.
   02_testbench.py             Stage 2             cocotb testbench source (no schema)
   02_formal_spec.json         Stage 3 (Agent 3)   FormalSpec   (JSON(TLA))
   03_rtl_output.json          Stage 3 (Compiler2) {"status","module_name","verilog_path","verilog"}
-  04_evaluation.json          Stage 4 (cocotb)    {"status"} | {"status","error"}
+  04_evaluation.json          Stage 4 (cocotb)    {"status"} | {"status","error","phase",...}
+  04_diagnosis.json           Diagnose node        {"status","failure_type","explanation"}
   refinement_chain.json       Refinement Engine   [{rule_name, params}]  (not routed on)
 
 Note: CLAUDE.md's "02_pluscal_impl.json" does not exist in the 3-agent design.
@@ -36,8 +37,13 @@ on disk. It never routes on Python return values or exceptions.
            → error: halt
 
   Stage 4 → success: terminal (done)
-           → error (retry_counts["stage4_cocotb"] < 2): revise_on_cocotb (re-run stage3)
+           → error (retry_counts["stage4_cocotb"] < _MAX_COCOTB_RETRIES): diagnose
            → error (exhausted): halt
+
+  Diagnose → last_diagnosis == "spec":        stage3_revise_cocotb
+           → last_diagnosis == "refinement":  stage3_backtrack_refinement
+
+  stage3_revise_cocotb / stage3_backtrack_refinement → advance to stage4 | halt
 """
 
 import json
@@ -48,15 +54,20 @@ from langgraph.graph import StateGraph, END
 from pipeline.state import PipelineState
 from pipeline.nodes.stage1 import run_stage1
 from pipeline.nodes.stage2 import run_stage2
-from pipeline.nodes.stage3 import run_stage3
+from pipeline.nodes.stage3 import (
+    run_stage3,
+    run_stage3_revise_cocotb,
+    run_stage3_backtrack_refinement,
+)
 from pipeline.nodes.stage4 import run_stage4
+from pipeline.nodes.diagnose import run_diagnose
 
 # ---------------------------------------------------------------------------
 # Retry limits
 # ---------------------------------------------------------------------------
 
 _MAX_STAGE1_RETRIES = 1        # Agent 1 one-shot; one retry on parse failure
-_MAX_COCOTB_RETRIES = 2        # Agent 3 revise_on_cocotb (Stage 4 failure)
+_MAX_COCOTB_RETRIES = 2        # total revision + backtrack attempts (Stage 4 failure)
 
 
 # ---------------------------------------------------------------------------
@@ -71,71 +82,6 @@ def _read_status(run_id: str, filename: str) -> str:
         return data.get("status", "error")
     except Exception:
         return "error"
-
-
-# ---------------------------------------------------------------------------
-# Stage 3 revise-on-cocotb wrapper
-# ---------------------------------------------------------------------------
-
-def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
-    """
-    Wraps Stage 3 for the cocotb-failure retry path.
-
-    Injects the cocotb sim log from 04_evaluation.json and calls
-    agent3.revise_on_cocotb before re-running the formal branch.
-    This node runs in place of the normal stage3 node on retry.
-
-    Increments retry_counts["stage4_cocotb"] before doing any work so the
-    edge function after stage3 (re-routed here) has the correct count if it
-    needs to halt on the next failure.
-    """
-    run_id = state["run_id"]
-    # Increment cocotb retry counter in the node (not in the edge function)
-    # so it persists in the state returned to LangGraph.
-    state["retry_counts"]["stage4_cocotb"] = (
-        state["retry_counts"].get("stage4_cocotb", 0) + 1
-    )
-    artifact_dir = Path("artifacts") / run_id
-
-    formal_path = artifact_dir / "02_formal_spec.json"
-    rtl_path = artifact_dir / "03_rtl_output.json"
-
-    # Load sim log from the failed evaluation
-    eval_path = artifact_dir / "04_evaluation.json"
-    sim_log = ""
-    try:
-        eval_data = json.loads(eval_path.read_text())
-        sim_log = eval_data.get("error", "")
-    except Exception:
-        pass
-
-    # Load the current formal spec
-    try:
-        from pipeline.schemas.tla_schema import FormalSpec
-        spec_data = json.loads(formal_path.read_text())
-        spec = FormalSpec.model_validate(spec_data)
-    except Exception as exc:
-        _write_node_error(rtl_path, f"revise_on_cocotb: cannot load FormalSpec: {exc}")
-        return state
-
-    # Revise via Agent 3
-    try:
-        from pipeline.agents import agent3
-        revised = agent3.revise_on_cocotb(spec, sim_log)
-        # Overwrite the formal spec so stage3 picks up the revision
-        artifact = revised.model_dump()
-        artifact["status"] = "success"
-        formal_path.write_text(json.dumps(artifact, indent=2))
-    except Exception as exc:
-        _write_node_error(rtl_path, f"revise_on_cocotb failed: {exc}")
-        return state
-
-    # Re-run the full formal branch with the revised spec
-    return run_stage3(state)
-
-
-def _write_node_error(path: Path, message: str) -> None:
-    path.write_text(json.dumps({"status": "error", "error": message}, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +114,18 @@ def _route_after_stage4(state: PipelineState) -> str:
     status = _read_status(state["run_id"], "04_evaluation.json")
     if status == "success":
         return "done"
-    # retry_counts["stage4_cocotb"] is incremented by run_stage3_revise_cocotb
-    # before it re-invokes stage3 (the revise path). Edge functions only route.
     retries = state["retry_counts"].get("stage4_cocotb", 0)
     if retries < _MAX_COCOTB_RETRIES:
-        return "revise"
+        return "diagnose"
     return "halt"
+
+
+def _route_after_diagnose(state: PipelineState) -> str:
+    """Route to spec revision or refinement backtrack based on diagnoser output."""
+    diagnosis = state.get("last_diagnosis", "spec")
+    if diagnosis == "refinement":
+        return "backtrack"
+    return "revise_spec"
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +146,12 @@ def build_graph() -> StateGraph:
           ↓ (on success or partial)
         stage4   (cocotb runner)
           ↓
-        done | stage3_revise_cocotb → stage3 loop | halt
+        done | diagnose | halt
+                  ↓
+        stage3_revise_cocotb (spec fault)
+        stage3_backtrack_refinement (refinement fault)
+          ↓ (on success or partial)
+        stage4
 
     Note: stage2 and stage3 run sequentially, not truly in parallel. This is
     intentional for LangGraph 0.2 compatibility — stage4 needs both their
@@ -207,8 +164,10 @@ def build_graph() -> StateGraph:
     builder.add_node("stage1", run_stage1)
     builder.add_node("stage2", run_stage2)
     builder.add_node("stage3", run_stage3)
-    builder.add_node("stage3_revise_cocotb", run_stage3_revise_cocotb)
     builder.add_node("stage4", run_stage4)
+    builder.add_node("diagnose", run_diagnose)
+    builder.add_node("stage3_revise_cocotb", run_stage3_revise_cocotb)
+    builder.add_node("stage3_backtrack_refinement", run_stage3_backtrack_refinement)
 
     # Entrypoint
     builder.set_entry_point("stage1")
@@ -238,20 +197,39 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Stage 4 → conditional: done | revise (cocotb failure retry) | halt
+    # Stage 4 → conditional: done | diagnose (cocotb failure) | halt
     builder.add_conditional_edges(
         "stage4",
         _route_after_stage4,
         {
             "done": END,
-            "revise": "stage3_revise_cocotb",
+            "diagnose": "diagnose",
             "halt": END,
         },
     )
 
-    # Cocotb-revision path: revise formal spec then re-run stage3
+    # Diagnose → conditional: spec revision | refinement backtrack
+    builder.add_conditional_edges(
+        "diagnose",
+        _route_after_diagnose,
+        {
+            "revise_spec": "stage3_revise_cocotb",
+            "backtrack":   "stage3_backtrack_refinement",
+        },
+    )
+
+    # Both revision paths re-enter stage4 after generating new RTL
     builder.add_conditional_edges(
         "stage3_revise_cocotb",
+        _route_after_stage3,
+        {
+            "advance": "stage4",
+            "halt": END,
+        },
+    )
+
+    builder.add_conditional_edges(
+        "stage3_backtrack_refinement",
         _route_after_stage3,
         {
             "advance": "stage4",

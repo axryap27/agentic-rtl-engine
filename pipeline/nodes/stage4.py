@@ -71,8 +71,11 @@ def run_stage4(state: PipelineState) -> PipelineState:
             eval_path.write_text(json.dumps({"status": "success"}, indent=2))
         else:
             eval_path.write_text(json.dumps({
-                "status": "error",
-                "error": result.get("error", "Unknown simulation failure"),
+                "status":         "error",
+                "phase":          result.get("phase", "unknown"),
+                "error":          result.get("error", "Unknown simulation failure"),
+                "failed_vectors": result.get("failed_vectors", []),
+                "raw":            result.get("raw", ""),
             }, indent=2))
     except Exception as exc:
         _write_error(eval_path, f"run_testbench raised: {exc}\n{traceback.format_exc()}")

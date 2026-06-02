@@ -16,3 +16,4 @@ class PipelineState(TypedDict):
     run_id: str
     retry_counts: dict[str, int]
     halt: bool
+    last_diagnosis: str | None  # "spec" | "refinement" — set by the diagnose node
