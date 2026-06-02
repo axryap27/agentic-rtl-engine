@@ -30,28 +30,30 @@ Three new files implement a two-way failure classification and routing system th
 
 ---
 
-### BUG-3: Agent 3 uses the Anthropic SDK instead of the OpenAI-compatible SDK
+### BUG-3 (RESOLVED — won't fix; Anthropic SDK is intentional): Agent 3 uses the Anthropic SDK
 
 **File:** `pipeline/agents/agent3.py:31,81`
 
-**What's happening:**
-The project is designed to route all LLM calls through a shared proxy configured by three environment variables: `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`. Agent 1 correctly uses the OpenAI-compatible client from the `openai` package with these variables.
+**Decision (2026-06-02):** Agent 3 **stays on the Anthropic SDK** with its own `ANTHROPIC_API_KEY`. This is a deliberate architecture choice (locked decision #3: Agent 3 is a distinct, tool-using Claude agent), not a defect. The key will be provisioned from a separate Anthropic account and added to `.env`.
 
-Agent 3 ignores all of this and imports the `anthropic` Python package directly, instantiating `anthropic.Anthropic(api_key=key)` with a separate `ANTHROPIC_API_KEY` environment variable. This means Agent 3 bypasses the proxy entirely, requires a second set of credentials that may not be available (especially in a university-provisioned environment), and gets no benefit from the proxy's prompt caching.
+The original report's three concerns were re-examined and found not to justify a migration:
+- *"Bypasses the proxy"* — true, but by design; Agent 3 is intentionally a distinct agent.
+- *"No prompt caching"* — the Anthropic SDK supports caching too; this is a future enhancement, not a blocker.
+- *"Requires a second credential that may be unavailable"* — the only real operational concern, and it is resolved by provisioning a dedicated key rather than collapsing Agent 3 onto the proxy. Note the proxy *does* route to Claude (`LLM_MODEL=~anthropic/claude-sonnet-latest`), so "OpenAI SDK vs Claude" was a false dichotomy; the only real axis was transport, and we keep the direct Anthropic transport for Agent 3.
 
-**Proposed fix:**
-Replace the `anthropic.Anthropic` client with `openai.OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"])`, matching the pattern in `agent1.py`. Rewrite `_run_with_tools()` and `pick_rule()` to use the OpenAI `chat.completions.create()` API. The tool-use loop in `_run_with_tools()` needs to handle OpenAI's `tool_calls` format instead of Anthropic's `tool_use` blocks.
+No code change. The placeholder hard-error at `_get_api_key()` (agent3.py:60) is the intended guard until the real key is set.
 
 ---
 
-### BUG-4: Passing `tools=[]` to the Anthropic SDK crashes on every `pick_rule` call
+### BUG-4 (FIXED): Passing `tools=[]` to the Anthropic SDK crashes on every `pick_rule` call
 
-**File:** `pipeline/agents/agent3.py:331`
+**File:** `pipeline/agents/agent3.py:326` (was :331)
 
-**What's happening:**
-The `pick_rule()` function passes `tools=[]` (an explicitly empty list) to `client.messages.create()`. The Anthropic API rejects this: if you specify the `tools` parameter at all, it must contain at least one tool definition. Passing an empty list raises an API validation error on every single `pick_rule` call, making rule selection completely non-functional.
+**What was happening:**
+`pick_rule()` passed `tools=[]` (an explicitly empty list) to `client.messages.create()`. The Anthropic API treats the presence of the `tools` field as "tool-calling requested" and then rejects an empty list, so every `pick_rule` call raised an API validation error — making rule selection completely non-functional once a live key is present. The empty list was intended to *enforce* the bounded-action-space invariant (no tools on `pick_rule`); correct intent, wrong mechanism.
 
-This will be resolved by fixing BUG-3 (switching to the OpenAI SDK). But if the Anthropic SDK is kept for any reason, the fix is simple: remove the `tools=[]` argument entirely when there are no tools to pass.
+**Fix applied (2026-06-02):**
+Removed the `tools=[]` argument from the `client.messages.create()` call entirely. Omitting the field is what actually enforces "no tool surface" — and the API accepts it. The bounded-action-space invariant is preserved (arguably strengthened: there is now genuinely no tools field on the `pick_rule` call). A comment at the call site documents why the argument is omitted rather than passed empty. Verified the module still imports cleanly.
 
 ---
 
