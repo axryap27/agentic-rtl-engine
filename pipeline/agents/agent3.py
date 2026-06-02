@@ -323,12 +323,14 @@ No other text, no markdown. Return only the JSON object.
 """
 
     # NO tools — this is a one-shot structured-output call.
+    # The `tools` argument is OMITTED entirely (not passed as []): the Anthropic
+    # API rejects an explicitly empty tools list, and omitting it is what actually
+    # enforces the bounded-action-space invariant (no tool surface on pick_rule).
     response = client.messages.create(
         model=_AGENT3_MODEL,
         max_tokens=512,
         temperature=0.0,
         system=system_prompt if system_prompt is not None else _SYSTEM_PROMPT,
-        tools=[],  # explicitly empty — bounded action space invariant
         messages=[{"role": "user", "content": user_message}],
     )
 
