@@ -18,6 +18,7 @@ import openai
 from pydantic import ValidationError
 
 from pipeline.schemas.summary_schema import SpecSummary
+from pipeline.usage import log_usage
 
 # ---------------------------------------------------------------------------
 # LLM client — instantiated once, shared across all calls in this process.
@@ -110,6 +111,9 @@ def run(nl_prompt: str) -> SpecSummary:
             {"role": "user", "content": nl_prompt},
         ],
     )
+
+    # Record token usage to the local ledger (never raises; see pipeline/usage.py).
+    log_usage(agent="agent1", model=model, usage=getattr(response, "usage", None))
 
     raw_text = response.choices[0].message.content or ""
     data = json.loads(raw_text)
