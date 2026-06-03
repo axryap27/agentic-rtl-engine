@@ -1,12 +1,13 @@
 """
-Stage 2 node — Agent 2 / cocotb testbench generator.
+Stage 2 node — deterministic cocotb testbench generator.
 
 Reads: artifacts/<run_id>/01_summary.json   (SpecSummary from Stage 1)
 Writes: artifacts/<run_id>/02_testbench.py  (cocotb testbench source)
         artifacts/<run_id>/02_testbench_meta.json  (status artifact for router)
 
-Agent 2 is deterministic (template-based, no LLM call in the current
-implementation in pipeline/cocotb/generator.py).
+This stage is fully deterministic (template-based, no LLM call). The generator
+lives in pipeline/cocotb/generator.py. (Historically specced as "Agent 2"; that
+LLM agent was retired in favor of pure templating — there is no agent2.py.)
 """
 
 import json
