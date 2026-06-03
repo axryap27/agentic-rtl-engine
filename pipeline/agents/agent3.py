@@ -86,8 +86,13 @@ def _get_client() -> Any:
 # Model constant
 # ---------------------------------------------------------------------------
 
-_MODEL = "claude-opus-4-5"  # pin a capable model; can override via env
-_AGENT3_MODEL = os.environ.get("AGENT3_MODEL", _MODEL)
+# Agent 3 runs on its OWN dedicated Anthropic model via the Anthropic SDK
+# (locked decision #3 / BUG-3: Agent 3 is a distinct, tool-using Claude agent).
+# This is intentionally SEPARATE from the proxy's LLM_MODEL used by Agent 1 —
+# do not collapse the two. The AGENT3_MODEL env var is the primary way to set
+# this; the literal below is only a sane default if the env var is unset.
+_DEFAULT_AGENT3_MODEL = "claude-opus-4-5"
+_AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +299,10 @@ def pick_rule(applicable_rules: list[dict], spec: dict, *, system_prompt: str | 
 
     Args:
         applicable_rules: List of rule descriptor dicts, each with at least:
-            {"rule_name": str, "description": str}
+            {"name": str, "describe": str}
+            (these are the keys the refinement engine actually sends — see
+            pipeline/refinement/engine.py where it builds
+            {"name": r.__class__.__name__, "describe": r.describe()}).
         spec: Current refinement engine spec dict.
 
     Returns:
