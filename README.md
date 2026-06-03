@@ -2,90 +2,87 @@
 
 > **"bounded action space tames hallucination" (Claude-Code Opus 4.8, June 2026)**
 
-Turn a plain-English description of a digital circuit into real, synthesizable hardware code (Verilog), with checks at every step so the output is trustworthy.
+Turns a natural-language description of a digital circuit into synthesizable Verilog, with a formal-verification check at every step.
 
-That one line at the top is the whole idea, so here it is in plain terms. Large language models are great at writing code but they also "hallucinate," meaning they confidently produce things that are subtly or completely wrong. Hardware is unforgiving: one wrong line and the chip misbehaves. So instead of asking an AI to write a big pile of hardware code in one shot and hoping it is correct, this project only ever lets the AI make **small, pre-approved moves from a short menu**. The menu is the "bounded action space." Each move on the menu is mathematically guaranteed to keep the design correct. The AI chooses *which* move to make next; it never freehand-writes the hardware. Narrow the choices, and you starve the hallucination.
+The tagline is the design thesis. An LLM asked to emit RTL in one shot will hallucinate: confidently wrong code that, in hardware, means a broken chip. So the LLM never freehand-writes hardware here. At each step it picks one move from a short, fixed menu of correctness-preserving transformations. The menu is the bounded action space. Constrain the choices and you starve the failure mode.
 
 ---
 
-## What it actually does
+## What it does
 
-You give it a sentence like:
+Given a prompt like:
 
 > "A 2-bit counter that increments every clock cycle when enabled, and resets to zero."
 
-and it produces a verilog file that a real hardware toolchain will accept, after automatically checking that the design behaves the way you asked.
+it emits a synthesizable `.v` file and verifies, automatically, that the design matches the requested behavior.
 
 ---
 
-## The core idea, a little deeper
+## The core idea
 
-To get from natural language (NL) to correct hardware description, the pipeline goes through an in-between form called a **formal specification** using precise, math-backed description of how the circuit should behave, with no ambiguity. This is written in **TLA+**.
+The path from prompt to hardware runs through a **formal specification**: an unambiguous, machine-checkable description of the circuit's behavior, written in **TLA+** (a specification language for describing and model-checking systems).
 
-The catch is that a formal spec starts out **abstract** (it says *what* should happen) and hardware needs something **concrete** (it says *how*, in terms of clocks, registers, and wires). Closing that gap is the hard part.
+A formal spec begins **abstract** (it says *what* should happen) while hardware is **concrete** (clocks, registers, wires). Bridging that gap is the hard problem, and the naive approach, asking an LLM to "rewrite this abstract spec as RTL," is exactly the open-ended request that invites hallucination.
 
-The usual temptation is to ask an AI to "rewrite this abstract spec as concrete hardware." That is exactly the open-ended, hallucination-prone request we want to avoid. Instead we use **stepwise refinement**: we lower the spec toward hardware one tiny step at a time, where each step is a single rule from a small fixed library. Every rule is provably correctness-preserving, so if you only ever apply rules from the library, the end result is correct by construction. The AI's only job at each step is to pick the next rule from the handful that currently apply. That is the bounded action space in action.
+Instead the engine uses **stepwise refinement**: it lowers the spec toward hardware one transformation at a time, each one a single rule from a small fixed library. Every rule is provably refinement-preserving, so a design built only from library rules is correct by construction. The LLM's entire job per step is to choose the next rule from the set that currently applies. It returns a `(rule, parameters)` choice and nothing else.
 
-A running log of every rule applied (`refinement_chain.json`) becomes a step-by-step proof trail from the abstract idea down to the hardware.
+Every applied rule is logged to `refinement_chain.json`, giving a replayable proof trail from abstract spec down to RTL.
 
 ---
 
-## How it works: four stages
+## Architecture: four stages
 
-The whole thing is orchestrated by **LangGraph**, which runs each stage and decides whether to move on, retry, or stop based on a `status` field each stage writes to disk. Stages hand data to each other as JSON files under `artifacts/<run_id>/`, so every run is fully inspectable after the fact.
+**LangGraph** orchestrates the run, advancing, retrying, or halting on the `status` field each stage writes to disk. Stages pass data as JSON under `artifacts/<run_id>/`, so every run is fully inspectable.
 
 ```
-        Plain-English prompt
+        Natural-language prompt
                  │
                  ▼
-   Stage 1  Understand the request
-            (AI) prompt  ->  structured summary + test cases
+   Stage 1  Interpret the request
+            (LLM)  prompt  ->  structured summary + test vectors
                  │
         ┌────────┴─────────────────────────────┐
         ▼                                       ▼
-   Stage 3  Build + lower the spec         Stage 2  Build the tests
-   (AI + math tools)                       (no AI, pure templates)
-     summary -> formal spec (TLA+)           summary -> a cocotb testbench
-       -> checked by TLC
+   Stage 3  Author + lower the spec        Stage 2  Generate the testbench
+   (LLM + deterministic tools)             (deterministic, no LLM)
+     summary -> formal spec (TLA+)           summary -> cocotb testbench
+       -> model-checked by TLC
        -> refined one rule at a time
        -> compiled to Verilog
         │                                       │
         └────────┬──────────────────────────────┘
                  ▼
-   Stage 4  Test the hardware
+   Stage 4  Simulate
             run the Verilog against the testbench
                  │
-          pass ->  done, you get verified Verilog
-          fail ->  a diagnoser figures out what went wrong
-                   and sends it back to be fixed
+          pass ->  verified Verilog
+          fail ->  diagnoser classifies the fault and routes the fix
 ```
 
-A quick gloss on the unfamiliar names:
+Terms worth pinning down:
 
-- **TLA+**: a precise language for describing how a system behaves, so a tool can check it.
-- **TLC**: the checker for TLA+. It explores the spec looking for ways it could break. If it finds one, the AI revises the spec and tries again.
-- **cocotb**: a Python framework for testing hardware. We auto-generate a testbench (a set of inputs and expected outputs) directly from your request, then run the generated Verilog against it.
-- **Refinement rules**: the short menu of correctness-preserving moves (see below).
-- **Diagnoser**: when a test fails, this decides whether the *idea* was wrong (fix the spec) or a *refinement step* was wrong (back up a few steps and try different choices), and routes the fix accordingly.
+- **TLA+ / TLC**: the spec language, and its model checker. TLC explores the spec's state space for invariant violations; on a hit, Agent 3 revises the spec and Compiler 1 + TLC re-run.
+- **cocotb**: a Python-based HDL verification framework. The testbench is generated mechanically from the Stage 1 test vectors and run against the emitted RTL.
+- **Diagnoser**: on a simulation failure, classifies it as a spec fault (wrong behavior, revise the FormalSpec) or a refinement fault (wrong rule parameters, backtrack the chain and re-pick), then routes accordingly.
 
-Notice that Stage 2 and the compilers have **no AI in them at all**. They are plain, deterministic Python. The AI is confined to three narrow jobs: understanding the prompt, authoring the formal spec, and picking refinement rules. Everything else is mechanical and repeatable.
+The LLM is confined to three jobs: interpreting the prompt, authoring/revising the formal spec, and picking refinement rules. Stage 2, both compilers, and the cocotb runner contain **no LLM calls**, they are deterministic Python.
 
 ---
 
-## The refinement library (the heart of the project)
+## The refinement library
 
-These are the only moves the AI can make to turn an abstract spec into hardware. Each one maps to a real hardware concept:
+The complete set of moves the LLM can make to lower an abstract spec to RTL. Each maps to a hardware construct:
 
-| Rule | What it does in hardware terms |
-|------|--------------------------------|
-| **Initialization** | Give every register a defined reset value |
-| **Iteration** | Make logic run once per clock tick (a clocked register) |
-| **Sequential Composition** | Chain steps that happen within one clock cycle |
-| **Assignment** | Update a register with a new value |
-| **Alternation** | Branch (an if/else, a mux, a case statement) |
-| **Introduce Variable** | Add a new register or wire |
+| Rule | Hardware meaning |
+|------|------------------|
+| **Initialization** | Reset value for every register |
+| **Iteration** | Clocked, per-cycle update (a register) |
+| **Sequential Composition** | Combinational steps within one cycle |
+| **Assignment** | Register update |
+| **Alternation** | Branch (if/else, mux, case) |
+| **Introduce Variable** | New register or wire |
 
-At each step the engine figures out which of these *can* legally apply, hands that short list to the AI, the AI picks one, and the engine applies it mechanically. The AI never writes Verilog or TLA+ directly during refinement; it only ever returns a choice like `(rule, parameters)`.
+The engine filters the library to the rules currently applicable, hands that set to the LLM, applies the chosen rule deterministically, and appends it to the chain. The LLM never emits TLA+ or Verilog during refinement.
 
 ---
 
@@ -94,107 +91,107 @@ At each step the engine figures out which of these *can* legally apply, hands th
 ```
 pipeline/
   graph.py              LangGraph wiring: runs stages, routes on status
-  state.py              the small bit of state carried between stages
-  schemas/              data shapes for every artifact (Pydantic models)
+  state.py              thin inter-stage state (run_id, retry_counts, halt)
+  schemas/              Pydantic models for every artifact
   agents/
-    agent1.py           Stage 1: prompt -> structured summary (AI)
-    agent3.py           Stage 3: authors + revises the formal spec, picks rules (AI)
-    agent_diagnoser.py  on a test failure, decides how to route the fix (AI)
+    agent1.py           Stage 1: prompt -> structured summary (LLM)
+    agent3.py           Stage 3: authors/revises the spec, picks rules (LLM)
+    agent_diagnoser.py  classifies + routes simulation failures (LLM)
   compilers/
-    compiler1.py        structured spec -> TLA+ text (no AI)
-    compiler2.py        refined spec -> synthesizable Verilog (no AI)
+    compiler1.py        structured spec -> TLA+ text (deterministic)
+    compiler2.py        refined spec -> synthesizable Verilog (deterministic)
   refinement/
-    engine.py           the loop: filter applicable rules, apply the choice, log it
-    rules/              the six rules above, one file each
-    bridge.py           translates between the spec formats the stages use
-  refinement_templates/ groups the rules into ordered passes (FSM, reset, etc.)
+    engine.py           the loop: filter applicable rules, apply choice, log
+    rules/              the six rules, one file each
+    bridge.py           translates between the stages' spec formats
+  refinement_templates/ groups rules into ordered passes (FSM, reset, etc.)
   cocotb/
-    generator.py        summary -> a cocotb testbench (no AI)
-    runner.py           runs the testbench, reports pass/fail with detail
+    generator.py        summary -> cocotb testbench (deterministic)
+    runner.py           runs the testbench, structured pass/fail report
   nodes/                one runner per stage, plus the diagnoser node
 main.py                 entry point
-tests/                  deterministic test suite (no AI calls, see below)
+tests/                  deterministic test suite (no LLM calls)
 ```
 
 ---
 
 ## Setup
 
-**Requirements:** Python 3.11+, and for actually running hardware: `iverilog` (Icarus Verilog) and `cocotb`. `verilator` is handy for extra lint checks.
+**Requirements:** Python 3.11+. To run hardware: `iverilog` and `cocotb` (`verilator` optional, for extra lint).
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Two separate AI accounts
+### Two credential sets
 
-This project talks to AI in two different ways, so it needs two sets of credentials. Copy `.env.example` to `.env` and fill them in:
+The pipeline uses two LLM transports, so it needs two sets of keys. Copy `.env.example` to `.env`:
 
-1. **Stages 1 and the diagnoser** go through an OpenAI-compatible proxy:
+1. **Stage 1 and the diagnoser** use an OpenAI-compatible proxy:
    ```
-   LLM_BASE_URL=...     # the proxy URL
-   LLM_API_KEY=...      # the proxy key
-   LLM_MODEL=...        # which model the proxy should use
+   LLM_BASE_URL=...     # proxy URL
+   LLM_API_KEY=...      # proxy key
+   LLM_MODEL=...        # model the proxy serves
    ```
-2. **Agent 3** (the spec author and rule picker) talks to Anthropic directly and needs its **own** key:
+2. **Agent 3** talks to Anthropic directly with its own key:
    ```
-   ANTHROPIC_API_KEY=...   # a real Anthropic API key
-   AGENT3_MODEL=...        # optional; which model Agent 3 uses
+   ANTHROPIC_API_KEY=...   # Anthropic API key
+   AGENT3_MODEL=...        # optional; Agent 3's model
    ```
 
-Why two? Agent 3 is deliberately built as a distinct, tool-using Anthropic agent, so it has its own credential. Until that key is set, Stages 1 and 2 still run, but Stage 3 stops with a clear "key not configured" message. Note that this Anthropic key is billed by usage and is separate from any Claude subscription (a subscription does not cover direct API calls).
+Agent 3 is intentionally a distinct, tool-using Anthropic agent with its own credential. Until that key is set, Stages 1 and 2 run but Stage 3 halts with a clear "key not configured" error. This Anthropic key is billed per-token and is separate from any Claude subscription (a subscription does not cover direct API usage).
 
 ---
 
-## Running the pipeline
+## Running
 
 ```bash
 python3.11 main.py
 ```
 
-This runs the full pipeline on the default 2-bit counter. Results land in `artifacts/<run_id>/`, with a fresh ID per run so nothing gets overwritten. You can open any of the JSON files to see exactly what each stage produced.
+Runs the full pipeline on the default 2-bit counter. Output lands in `artifacts/<run_id>/`, fresh ID per run, every intermediate artifact on disk for inspection.
 
 ---
 
-## Running tests
+## Tests
 
-The test suite is **fully deterministic and makes no AI calls**, so it is fast, free, and safe to run anytime:
+The suite is **fully deterministic with no LLM calls**, so it is fast, free, and safe to run anytime:
 
 ```bash
 python3.11 -m pytest tests/ -q
 ```
 
-It exercises the mechanical parts end to end (the refinement engine, the bridge, both compilers, and the cocotb run) using hand-built specs and a scripted rule-picker that stands in for the AI. The headline checks:
+It exercises the mechanical path end to end (engine, bridge, both compilers, cocotb) with hand-built specs and a scripted rule-picker standing in for the LLM. Headline coverage:
 
-- the refinement loop actually converges to hardware on a counter and a D flip-flop,
-- the generated Verilog is lint-clean and elaborates under Icarus Verilog,
-- multi-bit signals keep their width, input ports are declared, and the status routing is typo-proof.
+- the refinement loop converges to RTL on a counter and a D flip-flop,
+- emitted Verilog is lint-clean and elaborates under Icarus Verilog,
+- bit widths survive, free input ports are declared, and status routing is typo-proof (validated `status` envelope).
 
-The D flip-flop test also runs standalone, matching the dev guide:
+The D flip-flop test also runs standalone:
 
 ```bash
 python3.11 tests/test_dff.py
 ```
 
-Tests that call the real AI models will live separately and stay off by default, so a normal test run never spends money or hits the network.
+Tests that hit the real models live separately and are off by default, so a normal run never spends money or touches the network.
 
 ---
 
-## Current status
+## Status
 
-| Piece | Status |
-|-------|--------|
-| Stage 1 (understand the prompt) | Built |
-| Stage 2 (generate the testbench) | Built, deterministic, no AI |
-| Stage 3 (author spec, refine, compile to Verilog) | Built; needs the Agent 3 key to run live |
-| Stage 4 (run the testbench) | Built |
-| Diagnoser (route failures) | Built |
+| Component | State |
+|-----------|-------|
+| Stage 1 (prompt interpretation) | Built |
+| Stage 2 (testbench generation) | Built, deterministic |
+| Stage 3 (spec authoring, refinement, codegen) | Built; needs the Agent 3 key for live runs |
+| Stage 4 (simulation) | Built |
+| Diagnoser (failure routing) | Built |
 | Refinement engine + six rules | Built; converges on counter and flip-flop |
 | Deterministic test suite | 58 passing |
-| Live end-to-end run with real AI | Pending the Agent 3 key setup |
+| Live end-to-end run | Pending Agent 3 key setup |
 
-The whole machine is wired and the mechanical spine is proven. The next milestone is the first live run, where the real AI drives the refinement loop, which is the moment the central "bounded action space" idea gets tested for real.
+The full pipeline is wired and the deterministic spine is verified. The next milestone is the first live run, where the LLM drives refinement and the bounded-action-space thesis gets its real test.
 
 ---
 
-For the deeper design docs see `docs/architecture.md` (full system), `docs/layers_of_templates.md` (the refinement pass structure), and `CLAUDE.md` (the working contract for contributors).
+Deeper design docs: `docs/architecture.md` (full system), `docs/layers_of_templates.md` (refinement passes), `CLAUDE.md` (contributor contract).
