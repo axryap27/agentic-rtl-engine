@@ -16,3 +16,7 @@ markers = [
 ]
 addopts = "-m 'not live_llm'"
 testpaths = ["tests", "agentic_tests"]
+# Put the repo root on sys.path so `import pipeline` works no matter how pytest
+# is invoked (`pytest` console script vs `python -m pytest`). Without this, the
+# bare `pytest` command fails to import the `pipeline` package.
+pythonpath = ["."]
