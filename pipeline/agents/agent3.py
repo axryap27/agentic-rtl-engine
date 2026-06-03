@@ -35,6 +35,7 @@ except ImportError:
 
 from pipeline.schemas.summary_schema import SpecSummary
 from pipeline.schemas.tla_schema import FormalSpec
+from pipeline.usage import log_usage
 
 # ---------------------------------------------------------------------------
 # Key validation
@@ -178,7 +179,7 @@ def _handle_tool_call(tool_name: str, tool_input: dict) -> str:
 # Internal agentic loop (tool-using call types)
 # ---------------------------------------------------------------------------
 
-def _run_with_tools(user_message: str) -> str:
+def _run_with_tools(user_message: str, call_type: str | None = None) -> str:
     """
     Run an agentic tool-use loop with ANTHROPIC_API_KEY and the Agent 3 model.
 
@@ -187,6 +188,9 @@ def _run_with_tools(user_message: str) -> str:
 
     Used by: generate_formal_spec, revise_on_tlc, revise_on_cocotb.
     NOT used by: pick_rule (which has no tools and no loop).
+
+    call_type labels the usage-ledger entries with the originating entry point.
+    Each loop iteration is a separate billable call, so each is logged.
     """
     client = _get_client()
     messages: list[dict] = [{"role": "user", "content": user_message}]
@@ -199,6 +203,14 @@ def _run_with_tools(user_message: str) -> str:
             system=_SYSTEM_PROMPT,
             tools=_TOOLS,
             messages=messages,
+        )
+
+        # Record token usage for this iteration (never raises).
+        log_usage(
+            agent="agent3",
+            model=_AGENT3_MODEL,
+            usage=getattr(response, "usage", None),
+            call_type=call_type,
         )
 
         # Collect text and tool_use blocks from the response
@@ -254,7 +266,7 @@ SpecSummary:
 
 Return a single JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
+    raw = _run_with_tools(user_message, call_type="generate_formal_spec")
     data = json.loads(raw)
     return FormalSpec.model_validate(data)
 
@@ -283,7 +295,7 @@ TLC errors:
 
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
+    raw = _run_with_tools(user_message, call_type="revise_on_tlc")
     data = json.loads(raw)
     return FormalSpec.model_validate(data)
 
@@ -342,6 +354,14 @@ No other text, no markdown. Return only the JSON object.
         messages=[{"role": "user", "content": user_message}],
     )
 
+    # Record token usage for this one-shot call (never raises).
+    log_usage(
+        agent="agent3",
+        model=_AGENT3_MODEL,
+        usage=getattr(response, "usage", None),
+        call_type="pick_rule",
+    )
+
     raw = ""
     for block in response.content:
         if block.type == "text":
@@ -388,6 +408,6 @@ Cocotb simulation log:
 
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
+    raw = _run_with_tools(user_message, call_type="revise_on_cocotb")
     data = json.loads(raw)
     return FormalSpec.model_validate(data)
