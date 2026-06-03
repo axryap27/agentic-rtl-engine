@@ -13,6 +13,7 @@ import json
 import traceback
 from pathlib import Path
 
+from pipeline.schemas.envelope import write_artifact, write_error
 from pipeline.state import PipelineState
 
 try:
@@ -67,16 +68,17 @@ def run_stage4(state: PipelineState) -> PipelineState:
     # Run simulation
     try:
         result = run_testbench(testbench_path, verilog_path, module_name)
+        # Validate the status envelope (BUG-13) before writing.
         if result.get("status") == "pass":
-            eval_path.write_text(json.dumps({"status": "success"}, indent=2))
+            write_artifact(eval_path, {"status": "success"})
         else:
-            eval_path.write_text(json.dumps({
+            write_artifact(eval_path, {
                 "status":         "error",
                 "phase":          result.get("phase", "unknown"),
                 "error":          result.get("error", "Unknown simulation failure"),
                 "failed_vectors": result.get("failed_vectors", []),
                 "raw":            result.get("raw", ""),
-            }, indent=2))
+            })
     except Exception as exc:
         _write_error(eval_path, f"run_testbench raised: {exc}\n{traceback.format_exc()}")
 
@@ -84,4 +86,5 @@ def run_stage4(state: PipelineState) -> PipelineState:
 
 
 def _write_error(path: Path, message: str) -> None:
-    path.write_text(json.dumps({"status": "error", "error": message}, indent=2))
+    # Routed through the validated envelope helper (BUG-13).
+    write_error(path, message)

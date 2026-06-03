@@ -28,6 +28,7 @@ import json
 import traceback
 from pathlib import Path
 
+from pipeline.schemas.envelope import write_artifact, write_error
 from pipeline.state import PipelineState
 
 try:
@@ -71,7 +72,9 @@ def run_stage1(state: PipelineState) -> PipelineState:
         summary = agent1.run(prompt)
         artifact = summary.model_dump()
         artifact["status"] = "success"
-        out_path.write_text(json.dumps(artifact, indent=2))
+        # Validate the status envelope (BUG-13) before writing so a typo'd
+        # status fails here instead of silently misrouting in LangGraph.
+        write_artifact(out_path, artifact)
     except Exception as exc:
         _write_error(out_path, f"Agent 1 failed: {exc}\n{traceback.format_exc()}")
         # Increment retry counter on failure so the edge function can decide
@@ -82,4 +85,5 @@ def run_stage1(state: PipelineState) -> PipelineState:
 
 
 def _write_error(path: Path, message: str) -> None:
-    path.write_text(json.dumps({"status": "error", "error": message}, indent=2))
+    # Routed through the validated envelope helper (BUG-13).
+    write_error(path, message)

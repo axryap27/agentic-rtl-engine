@@ -38,6 +38,7 @@ import tempfile
 import traceback
 from pathlib import Path
 
+from pipeline.schemas.envelope import write_artifact, write_error
 from pipeline.state import PipelineState
 from pipeline.schemas.summary_schema import SpecSummary
 from pipeline.schemas.tla_schema import FormalSpec
@@ -247,7 +248,8 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
     formal_artifact["status"] = "success" if not tlc_errors else "error"
     if tlc_errors:
         formal_artifact["tlc_errors"] = tlc_errors
-    formal_path.write_text(json.dumps(formal_artifact, indent=2))
+    # Validate the status envelope (BUG-13) before writing.
+    write_artifact(formal_path, formal_artifact)
 
     if tlc_errors and formal_artifact["status"] == "error":
         _write_error(rtl_path, f"TLC verification failed after retries: {tlc_errors}")
@@ -287,14 +289,14 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
 
             if refinement_warnings:
                 formal_artifact["refinement_warnings"] = refinement_warnings
-                formal_path.write_text(json.dumps(formal_artifact, indent=2))
+                write_artifact(formal_path, formal_artifact)
 
             rtl_tla_source = engine_spec_to_rtl_tla(current_spec, spec.module_name)
 
         except Exception as exc:
             formal_artifact["refinement_error"] = f"{exc}\n{traceback.format_exc()}"
             formal_artifact["status"] = "partial"
-            formal_path.write_text(json.dumps(formal_artifact, indent=2))
+            write_artifact(formal_path, formal_artifact)
 
     # ---- Compiler 2 → Verilog-2001 ----
     if not _COMPILER2_AVAILABLE:
@@ -310,12 +312,12 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
-        rtl_path.write_text(json.dumps({
+        write_artifact(rtl_path, {
             "status":       "success",
             "module_name":  spec.module_name,
             "verilog_path": str(verilog_file),
             "verilog":      verilog,
-        }, indent=2))
+        })
     except Exception as exc:
         _write_error(rtl_path, f"Compiler 2 failed: {exc}\n{traceback.format_exc()}")
 
@@ -554,12 +556,12 @@ update expressions that differ from the choices that led to the failure.
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
-        rtl_path.write_text(json.dumps({
+        write_artifact(rtl_path, {
             "status":       "success",
             "module_name":  spec.module_name,
             "verilog_path": str(verilog_file),
             "verilog":      verilog,
-        }, indent=2))
+        })
     except Exception as exc:
         _write_error(rtl_path, f"Compiler 2 failed after backtrack: {exc}\n{traceback.format_exc()}")
 
@@ -567,4 +569,5 @@ update expressions that differ from the choices that led to the failure.
 
 
 def _write_error(path: Path, message: str) -> None:
-    path.write_text(json.dumps({"status": "error", "error": message}, indent=2))
+    # Routed through the validated envelope helper (BUG-13).
+    write_error(path, message)

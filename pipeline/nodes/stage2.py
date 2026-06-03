@@ -6,13 +6,14 @@ Writes: artifacts/<run_id>/02_testbench.py  (cocotb testbench source)
         artifacts/<run_id>/02_testbench_meta.json  (status artifact for router)
 
 Agent 2 is deterministic (template-based, no LLM call in the current
-implementation in pipeline/agents/agent2.py / pipeline/cocotb/generator.py).
+implementation in pipeline/cocotb/generator.py).
 """
 
 import json
 import traceback
 from pathlib import Path
 
+from pipeline.schemas.envelope import write_artifact, write_error
 from pipeline.state import PipelineState
 from pipeline.schemas.summary_schema import SpecSummary
 
@@ -55,10 +56,11 @@ def run_stage2(state: PipelineState) -> PipelineState:
 
     try:
         generate_testbench(summary, tb_path)
-        meta_path.write_text(json.dumps({
+        # Validate the status envelope (BUG-13) before writing.
+        write_artifact(meta_path, {
             "status": "success",
             "testbench_path": str(tb_path),
-        }, indent=2))
+        })
     except Exception as exc:
         _write_error(meta_path, f"Testbench generation failed: {exc}\n{traceback.format_exc()}")
 
@@ -66,4 +68,5 @@ def run_stage2(state: PipelineState) -> PipelineState:
 
 
 def _write_error(path: Path, message: str) -> None:
-    path.write_text(json.dumps({"status": "error", "error": message}, indent=2))
+    # Routed through the validated envelope helper (BUG-13).
+    write_error(path, message)
