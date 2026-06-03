@@ -173,6 +173,11 @@ def run_testbench(testbench_path: Path, rtl_path: Path, module_name: str) -> dic
         "COCOTB_RESULTS_FILE": str(results_xml),
         # Suppress cocotb's coloured output so raw is readable in logs.
         "COCOTB_ANSI_OUTPUT": "0",
+        # Guarantee the generated testbench can import pipeline.* even in a
+        # fresh environment where the caller never exported PYTHONPATH. cwd is
+        # the artifacts dir, so the repo root must be on the path explicitly.
+        # parents[2] of pipeline/cocotb/runner.py is the repo root.
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
     }
 
     # Inherit the parent environment so Python path etc. are available.
