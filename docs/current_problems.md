@@ -1,6 +1,6 @@
 # Current Problems
 
-Last updated: 2026-06-02 (bug-fix sweep: BUG-5/6b/8/10/13/14/15/16/17/N2/N3 fixed; BUG-9 deferred)  
+Last updated: 2026-06-02 (bug-fix sweep: BUG-5/6b/8/10/13/14/15/16/17/18/N2/N3 fixed; BUG-9 resolved — test_dff.py now exists)  
 Branch: pipeline-dev
 
 ---
@@ -27,6 +27,29 @@ Three new files implement a two-way failure classification and routing system th
 ---
 
 ## Critical — These break the pipeline entirely
+
+---
+
+### BUG-18 (FIXED): Free input ports referenced in transitions are never declared
+
+**Files:** `pipeline/refinement/bridge.py` (`engine_spec_to_rtl_tla`, new `_free_inputs` / `_scan_identifiers`), `pipeline/compilers/compiler2.py` (new `_undeclared_inputs`, `_scan_verilog_identifiers`)
+
+**What was happening:**
+A "free" input identifier — one that appears only in a transition guard or update expression, is not a FormalSpec/engine `variable`, and so never enters the RTL-style TLA+ `VARIABLES` block — was emitted into Verilog *without a port declaration*. Two confirmed reproductions:
+
+- **D flip-flop (hard error):** `variables: {q}`, `transitions: [{Capture, "TRUE", {q: "d"}}]`. After refinement Compiler 2 emitted `q <= d;` where `d` is never declared. `iverilog -Wall -t null` failed: `error: Unable to bind wire/reg/memory 'd' in 'dff'`.
+- **2-bit counter (silent, worse):** Tick guarded by `en = 1`. Because Compiler 2 does not translate guards in `UpdatePipeline`, `en` never appeared in emitted Verilog at all — the enable was *silently dropped* and the counter counted unconditionally (no error, wrong hardware).
+
+**Root cause:** `d`/`en` are free identifiers absent from `VARIABLES` entirely. Compiler 2 already infers an input port for any VARIABLES entry not driven by CombinationalLogic/UpdatePipeline (that is how `in_a`/`in_b` become inputs in `SAMPLE_TLA`), but it never *saw* `d`/`en` because they were never declared.
+
+**Fix applied (2026-06-02) — primary in the bridge (A) + defensive guard in Compiler 2 (B):**
+
+- **(A) Bridge — primary.** `engine_spec_to_rtl_tla` now scans every action's update expressions and every *non-reset* action's guard for identifiers that are not a declared variable, not `clk`/`reset`, not a TLA+/Verilog keyword (`_RESERVED_IDENTIFIERS`), and not a numeric literal. The free identifiers are injected into the `VARIABLES` block (default `\* width: 1`, consistent with the BUG-17 width-comment convention, sorted for determinism). Compiler 2's existing "not driven by either block → input port" classifier then declares them as inputs automatically — keeping its port model uniform (everything it ports is a VARIABLES entry). The reset action's *own* guard is deliberately excluded: the bridge replaces it with a hardcoded `IF reset = 1 THEN ...`, so the Initialization rule's formal guard `rst = TRUE` is never emitted, and scanning it would manufacture a dangling `rst` port.
+- **(B) Compiler 2 — defensive guard.** `_undeclared_inputs` scans the *translated* RHS of every emitted assign / clocked assignment for identifiers that are not declared, not `clk`/`reset`, not a reserved word, and not `hw_*`, and declares each as a scalar input. This guarantees Compiler 2 never emits a module referencing an undeclared wire even when the bridge is bypassed (hand-written TLA+ fed straight in). Block comments (`/* FORMAL_ONLY */`) are stripped before the scan so dropped formal-only markers are not mistaken for ports.
+
+Chose A as primary (the bridge owns the RTL-style TLA+ contract — it already injects `clk`/`reset` and the width comments) with B as a robustness net for the bridge-bypass path, exactly as the analysis recommended.
+
+**Verified:** new acceptance test `tests/test_dff.py` (the BUG-9 file) runs the hand-built DFF through `formal_spec_to_engine_spec → engine.run(stub) → engine_spec_to_rtl_tla → compile_tla_to_verilog` and asserts (1) `always @(posedge clk)` present, (2) `d` declared `input`, (3) `q` is `output reg`, (4) the Verilog **elaborates clean under `iverilog -Wall -t null` (exit 0)** — the criterion that catches BUG-18 — plus no-spurious-`rst`, determinism, the counter-`en`-declared regression, and the bridge-bypass defensive case. DFF is also `verilator --lint-only` clean. Full suite: 58 passed (was 50; +8).
 
 ---
 
@@ -121,6 +144,8 @@ Create `tests/test_dff.py` with a minimal integration test: feed a D flip-flop N
 **Status (2026-06-02): DEFERRED — needs a user decision.** A true Stage 1 + Stage 3 integration test cannot run offline/in-CI: Stage 1 (Agent 1) needs the proxy `LLM_*` keys and Stage 3 (Agent 3) needs `ANTHROPIC_API_KEY` (BUG-3 keeps the Anthropic SDK). The existing suite is fully deterministic and key-free, and we want to keep it that way.
 
 **Recommendation:** write `tests/test_dff.py` but guard it with `pytest.mark.skipif` when the required keys are absent, so CI skips it and a developer with keys can run a real DFF round-trip. This keeps CLAUDE.md honest (the file exists, the command works) without making the green suite depend on live LLM calls. Do NOT simply delete the CLAUDE.md reference — that hides a documented integration entry point. Awaiting the user's go-ahead before creating the file.
+
+**Update (2026-06-02): RESOLVED.** `tests/test_dff.py` now exists. Per the user's decision it is a **deterministic, NO-LLM** integration test that bypasses Agent 1 / Agent 3 (hand-built DFF FormalSpec + deterministic stub `pick_rule`, mirroring `tests/test_refinement_convergence.py`), so it needs **no keys** and stays in the green suite — no `skipif` on keys was needed. It is also the **acceptance test for BUG-18**: it gates on `iverilog -Wall -t null` elaborating the DFF clean (exit 0), the criterion that catches the undeclared-`d` defect. Runnable both as a pytest module and via `python3.11 tests/test_dff.py` (dual-mode `__main__`), exactly as CLAUDE.md documents. The `iverilog` gate skips gracefully only if `iverilog` is genuinely absent.
 
 ---
 
