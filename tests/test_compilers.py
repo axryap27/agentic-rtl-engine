@@ -398,6 +398,105 @@ Spec == Init /\ [][Next]_vars
     assert rc == 0, f"Counter lint failed:\n{out}\n\nVerilog:\n{verilog}"
 
 
+# BUG-14: TLA+ module footer must be at least as long as the header
+
+
+def _hdr_ftr_lengths(tla: str) -> tuple[int, int]:
+    lines = [l for l in tla.splitlines() if l.strip()]
+    hdr = next(l for l in lines if "MODULE" in l)
+    ftr = next(l for l in reversed(lines) if set(l.strip()) == {"="})
+    return len(hdr), len(ftr)
+
+
+def test_bug14_compiler1_footer_at_least_header():
+    from pipeline.compilers.compiler1 import _emit_tla, _make_counter_spec
+    h, f = _hdr_ftr_lengths(_emit_tla(_make_counter_spec()))
+    assert f >= h, f"footer {f} shorter than header {h}"
+
+
+def _bug14_engine_spec() -> dict:
+    return {
+        "variables": [{"name": "count", "type": "Nat", "width": 2}],
+        "actions": [{"name": "Tick", "clocked": True,
+                     "updates": [{"variable": "count", "expression": "count + 1"}]}],
+        "reset_action": None,
+        "init": "count = 0",
+        "invariants": ["count >= 0"],
+    }
+
+
+def test_bug14_bridge_rtl_footer_at_least_header():
+    from pipeline.refinement.bridge import engine_spec_to_rtl_tla
+    h, f = _hdr_ftr_lengths(engine_spec_to_rtl_tla(_bug14_engine_spec(), "MyCounter"))
+    assert f >= h, f"footer {f} shorter than header {h}"
+
+
+def test_bug14_bridge_abstract_footer_at_least_header():
+    from pipeline.refinement.bridge import engine_spec_to_abstract_tla
+    tla, _cfg = engine_spec_to_abstract_tla(_bug14_engine_spec(), "MyCounter")
+    h, f = _hdr_ftr_lengths(tla)
+    assert f >= h, f"footer {f} shorter than header {h}"
+
+
+# BUG-17: bit width carried bridge -> compiler2 (multi-bit signals get [N-1:0])
+
+
+def _width2_counter_rtl_tla(tick_expr: str) -> str:
+    """RTL-style TLA+ for a width-2 counter via the real bridge path.
+
+    tick_expr is the non-reset update expression for `count`.
+    """
+    from pipeline.refinement.bridge import engine_spec_to_rtl_tla
+
+    engine_spec = {
+        "variables": [
+            {"name": "count", "type": "Nat", "width": 2, "abstract": False,
+             "reset_value": "0", "clocked": True},
+        ],
+        "actions": [
+            {"name": "Reset", "guard": "reset = 1", "clocked": True,
+             "updates": [{"variable": "count", "expression": "0"}]},
+            {"name": "Tick", "guard": "TRUE", "clocked": True,
+             "updates": [{"variable": "count", "expression": tick_expr}]},
+        ],
+        "reset_action": "Reset",
+        "init": "count = 0",
+        "invariants": [],
+    }
+    return engine_spec_to_rtl_tla(engine_spec, "counter")
+
+
+def test_bug17_width_carried_to_verilog_range():
+    """A width-2 variable must emit a [1:0] range, not a bare scalar reg.
+
+    This is the core BUG-17 fix: without width carried bridge -> Compiler 2,
+    `count` was emitted as a bare scalar and multi-bit values truncated to 1 bit.
+    """
+    verilog = compile_tla_to_verilog(
+        _width2_counter_rtl_tla("(count + 1) % 4"), "counter"
+    )
+    # count is clocked -> output reg; must be sized [1:0]
+    assert "output reg [1:0] count" in verilog, (
+        f"width-2 signal not sized:\n{verilog}"
+    )
+
+
+def test_bug17_width2_counter_lint_clean_no_widthtrunc():
+    """A width-2 counter that wraps via IF-THEN-ELSE must lint clean.
+
+    With BUG-17, the [1:0] range is now present, so a width-clean update
+    expression (explicit wrap rather than `% 2^k`, which trips a verilator
+    pow2-modulo width quirk -- see docs/current_problems.md BUG-17 note)
+    produces fully WIDTHTRUNC-clean Verilog.
+    """
+    tick = "IF count = 3 THEN 0 ELSE count + 1"
+    verilog = compile_tla_to_verilog(_width2_counter_rtl_tla(tick), "counter")
+    assert "output reg [1:0] count" in verilog
+    rc, out = _run_linter(verilog)
+    assert "WIDTHTRUNC" not in out, f"WIDTHTRUNC present:\n{out}\n\n{verilog}"
+    assert rc == 0, f"width-2 counter lint failed:\n{out}\n\nVerilog:\n{verilog}"
+
+
 # CLI self-test
 
 if __name__ == "__main__":
@@ -437,6 +536,11 @@ if __name__ == "__main__":
         test_compiler2_no_logic_keyword_in_output,
         test_compiler2_sample_lint_clean,
         test_compiler2_counter_tla_lint_clean,
+        test_bug14_compiler1_footer_at_least_header,
+        test_bug14_bridge_rtl_footer_at_least_header,
+        test_bug14_bridge_abstract_footer_at_least_header,
+        test_bug17_width_carried_to_verilog_range,
+        test_bug17_width2_counter_lint_clean_no_widthtrunc,
     ]
     passed = failed = 0
     for t in tests:
