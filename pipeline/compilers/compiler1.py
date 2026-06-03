@@ -295,7 +295,9 @@ def _emit_tla(spec: "FormalSpec") -> str:
     lines.append("")
 
     # ---- Module footer ----
-    lines.append("=" * (len(sep) * 2 + len(name) + 2))
+    # Footer must be >= header length. Header is f"{sep} MODULE {name} {sep}"
+    # = len(sep)*2 + len(" MODULE ") + len(name) + len(" ") = len(sep)*2 + len(name) + 9.
+    lines.append("=" * (len(sep) * 2 + len(name) + 9))
 
     return "\n".join(lines)
 
