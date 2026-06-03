@@ -1,262 +1,195 @@
-# Current Problems
+# Current Problems — Resolved Ledger
 
-Last updated: 2026-06-02 (bug-fix sweep: BUG-5/6b/8/10/13/14/15/16/17/18/N2/N3 fixed; BUG-9 resolved — test_dff.py now exists)  
-Branch: pipeline-dev
+**Last updated:** 2026-06-02
+**Branch:** `pipeline-dev`
+**Status:** All audited bugs closed (fixed or ratified won't-fix). Test suite: **58 passed**, fully deterministic / no live LLM calls. Working tree has uncommitted changes (committed by the user, not by tooling).
 
----
-
-## Recently Fixed (no longer bugs)
-
-- **BUG-1 (resolved):** The refinement engine format mismatch is fixed. `pipeline/refinement/bridge.py` now provides `formal_spec_to_engine_spec()`, which `stage3.py` calls correctly before passing the spec to the engine.
-- **BUG-2 (resolved):** The cocotb retry loop no longer discards the revision. `stage3.py` now exposes a shared `_run_stage3_from_spec(state, spec)` helper. `run_stage3_revise_cocotb()` calls it directly with the revised `FormalSpec` instead of calling `run_stage3()`, which would have regenerated from scratch.
-- **BUG-6 (resolved):** The `_make_pick_rule_callable()` fallback now uses `applicable_rules[0]["name"]` (the correct key sent by the engine) instead of `applicable_rules[0]["rule_name"]` (which raised `KeyError`).
-- **BUG-7 (resolved):** The refinement engine output is no longer discarded. After the engine runs, `stage3.py` calls `engine_spec_to_rtl_tla()` from `bridge.py` to produce RTL-style TLA+ for Compiler 2.
-- **BUG-12 (resolved / was wrong):** The `refinement_templates/` directory is not dead code — `stage3.py` actively imports and uses all six pass configurations to structure the multi-pass refinement loop.
-
-### Diagnoser / routing agent (new in this session)
-
-Three new files implement a two-way failure classification and routing system that sits between Stage 4 and the Stage 3 revision paths:
-
-- **`pipeline/agents/agent_diagnoser.py`** — LLM agent that reads `04_evaluation.json`, `02_formal_spec.json`, and `refinement_chain.json`. Build failures (`phase == "build"`) are classified as `"spec"` without an LLM call. Test failures use an LLM to distinguish a spec fault (wrong core logic) from a refinement fault (wrong parameters — reset values, clock domains, update expressions).
-- **`pipeline/nodes/diagnose.py`** — Thin LangGraph node wrapping the diagnoser agent. Writes `04_diagnosis.json` and sets `state["last_diagnosis"]` to `"spec"` or `"refinement"`. Defaults to `"spec"` on any error so routing always has a valid signal.
-- **`pipeline/nodes/stage3.py`** — Extended with `run_stage3_backtrack_refinement()`: keeps the FormalSpec unchanged, truncates `refinement_chain.json` by `BACKTRACK_STEPS`, replays the chain to the truncation point via `_replay_chain()`, injects the diagnosis explanation into the pick_rule system prompt, and re-runs the engine from the checkpoint. Pre-backtrack history is saved to `refinement_chain_prefix.json`.
-- **`pipeline/state.py`** — Added `last_diagnosis: str | None` field.
-- **`pipeline/nodes/stage4.py`** — Failure branch now writes the full structured runner result (`phase`, `failed_vectors`, `raw`) so the diagnoser has all the context it needs.
-- **`pipeline/graph.py`** — Updated: removed the local `run_stage3_revise_cocotb` definition, added `diagnose` and `stage3_backtrack_refinement` nodes, updated `_route_after_stage4` to route to `"diagnose"` on failure, added `_route_after_diagnose` to fork between the two revision paths.
+This file is the closed ledger for the bug-fix sweep on `pipeline-dev`. Every entry is resolved. The only open items are **deferred follow-ups** and **setup still pending** (below) — neither is a defect.
 
 ---
 
-## Critical — These break the pipeline entirely
+## Status at a glance
+
+| Bug | Severity | Title | Disposition |
+|-----|----------|-------|-------------|
+| BUG-1 | — | Refinement engine format mismatch | ✅ Fixed (bridge) |
+| BUG-2 | — | cocotb retry loop discarded revision | ✅ Fixed |
+| BUG-3 | Critical | Agent 3 uses the Anthropic SDK | ✅ Won't-fix (intentional; see decision) |
+| BUG-4 | Critical | `tools=[]` crashes every `pick_rule` call | ✅ Fixed |
+| BUG-5 | Low | Stale `agents/agent2.py` dead code | ✅ Fixed (deleted) |
+| BUG-6 | — | `pick_rule` fallback used wrong key | ✅ Fixed |
+| BUG-6b | High | `pick_rule` docstring wrong field names | ✅ Fixed (docstring) |
+| BUG-7 | — | Refinement engine output discarded | ✅ Fixed |
+| BUG-8 | Medium | `compiler2.py` docstring wrong stage/artifact | ✅ Fixed (docstring) |
+| BUG-9 | Medium | `tests/test_dff.py` documented but missing | ✅ Resolved (written, deterministic) |
+| BUG-10 | Medium | CLAUDE.md artifact table mismatched code | ✅ Fixed |
+| BUG-12 | — | `refinement_templates/` thought dead | ✅ Not a bug (in active use) |
+| BUG-13 | Medium | No Pydantic guard on the `status` envelope | ✅ Fixed (`ArtifactEnvelope`) |
+| BUG-14 | Low | TLA+ module footer shorter than header | ✅ Fixed (3 sites) |
+| BUG-15 | Low | `agent3.py` hardcoded model name | ✅ Fixed (env override primary) |
+| BUG-16 | Low | runner subprocess missing `PYTHONPATH` | ✅ Fixed |
+| BUG-17 | Critical | Bit width dropped → multi-bit truncation | ✅ Fixed (bridge↔compiler2 width channel) |
+| BUG-18 | Critical | Free input ports (`d`, `en`) never declared | ✅ Fixed (bridge + compiler2 guard) |
+| BUG-N2 | Medium | `stage2.py` docstring cited deleted `agent2.py` | ✅ Fixed (docstring) |
+| BUG-N3 | Low | cocotb 1.x `units=` clock API | ✅ Fixed (`unit=`) |
+| CLAUDE.md drift | — | "use OpenAI SDK not anthropic" + `schemas.py` path | ✅ Fixed (verifier-caught) |
+
+The two highest-value finds were **not** in the team's original audit: **BUG-17** (silent multi-bit truncation, surfaced during the sweep) and **BUG-18** (free input ports never declared — the DFF wouldn't elaborate and the counter's enable was silently dropped, surfaced by writing the BUG-9 DFF test).
 
 ---
+
+## Setup still pending (not a bug — deferred work)
+
+### Agent 3 SDK / API key — TO DO before any live full-pipeline run
+
+Agent 3 is wired to the **Anthropic SDK** and needs `ANTHROPIC_API_KEY` set in `.env` to a real key. Until then it raises a clear, intentional error at call time (`_get_api_key()` in `agent3.py`), so Stages 1–2 still run but Stage 3 cannot.
+
+What's left to do:
+1. **Provision the key.** Create/set up a **separate Anthropic Console account** (`console.anthropic.com`) with **pay-as-you-go API credits** for Agent 3. This is billed independently from any Claude **subscription** (e.g. Max/Pro) — a subscription **cannot** drive the raw SDK; you need Console API credits. A small prepaid amount goes a long way (Agent 3 makes only a handful of calls per run).
+2. **Add it to `.env`:** replace the placeholder `ANTHROPIC_API_KEY=__AGENT3_CLAUDE_AGENT_SDK_KEY__NOT_CONFIGURED_YET__` with the real key.
+3. **(Optional) Pick the model:** `AGENT3_MODEL` overrides the default `claude-opus-4-5`. For cheap dev iterations, set a smaller model (e.g. a Haiku/Sonnet); raise to Opus for max quality. This is Agent 3's **own** model, intentionally distinct from the proxy's `LLM_MODEL` used by Agent 1 (see BUG-15).
+
+Note on the other transports: **Agent 1 and the diagnoser** use the OpenAI-compatible **proxy** (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`, currently the writingmate proxy routing to Claude). As of 2026-06-02 **no live LLM call has been made through any transport** — the entire test/verification effort is deterministic (hand-built specs + stub `pick_rule`), so no proxy or API tokens have been consumed yet.
+
+### Deferred follow-up
+
+- **Refinement should prefer explicit-wrap over `% 2^k` for sized counters.** Sizing is fixed (BUG-17), but verilator still emits a cosmetic `WIDTHTRUNC` on the `count <= (count + 1) % 4` idiom. Emitting `IF count = MAX THEN 0 ELSE count + 1` instead is fully lint-clean on both iverilog and verilator. Not a correctness issue; a polish item for the refinement/pick_rule policy.
+
+---
+
+## Diagnoser / routing agent (added this session)
+
+A two-way failure classifier sits between Stage 4 and the Stage 3 revision paths:
+
+- **`pipeline/agents/agent_diagnoser.py`** — reads `04_evaluation.json`, `02_formal_spec.json`, `refinement_chain.json`. Build failures (`phase == "build"`) are classified `"spec"` with **no** LLM call; test failures use an LLM to distinguish a spec fault (wrong core logic) from a refinement fault (wrong parameters — reset values, clock domains, update expressions).
+- **`pipeline/nodes/diagnose.py`** — thin node wrapping the diagnoser; writes `04_diagnosis.json`, sets `state["last_diagnosis"]`, defaults to `"spec"` on any error so routing always has a valid signal.
+- **`pipeline/nodes/stage3.py`** — `run_stage3_backtrack_refinement()`: keeps the FormalSpec, truncates `refinement_chain.json` by `BACKTRACK_STEPS`, replays to the truncation point, injects the diagnosis into the `pick_rule` prompt, re-runs the engine; pre-backtrack history saved to `refinement_chain_prefix.json`.
+- **`pipeline/state.py`** — added `last_diagnosis: str | None`.
+- **`pipeline/nodes/stage4.py`** — failure branch writes the full structured runner result (`phase`, `failed_vectors`, `raw`).
+- **`pipeline/graph.py`** — added `diagnose` + `stage3_backtrack_refinement` nodes; `_route_after_stage4` routes to `"diagnose"` on failure; `_route_after_diagnose` forks the two revision paths.
+
+The diagnoser is a runtime LLM agent (proxy transport). It will also need the proxy keys to run live.
+
+---
+
+## Critical — fixed
 
 ### BUG-18 (FIXED): Free input ports referenced in transitions are never declared
 
-**Files:** `pipeline/refinement/bridge.py` (`engine_spec_to_rtl_tla`, new `_free_inputs` / `_scan_identifiers`), `pipeline/compilers/compiler2.py` (new `_undeclared_inputs`, `_scan_verilog_identifiers`)
+**Files:** `pipeline/refinement/bridge.py` (`engine_spec_to_rtl_tla`, new `_free_inputs` / `_scan_identifiers`); `pipeline/compilers/compiler2.py` (new `_undeclared_inputs`, `_scan_verilog_identifiers`).
 
-**What was happening:**
-A "free" input identifier — one that appears only in a transition guard or update expression, is not a FormalSpec/engine `variable`, and so never enters the RTL-style TLA+ `VARIABLES` block — was emitted into Verilog *without a port declaration*. Two confirmed reproductions:
+**What was happening:** a "free" input identifier — appearing only in a transition guard or update expression, not a FormalSpec/engine `variable`, and so never entering the RTL-style TLA+ `VARIABLES` block — was emitted into Verilog *without a port declaration*. Two confirmed reproductions:
+- **D flip-flop (hard error):** `variables: {q}`, `transitions: [{Capture, "TRUE", {q: "d"}}]`. Compiler 2 emitted `q <= d;` with `d` undeclared → `iverilog -Wall -t null` failed: `error: Unable to bind wire/reg/memory 'd' in 'dff'`.
+- **2-bit counter (silent, worse):** Tick guarded by `en = 1`. Compiler 2 does not translate `UpdatePipeline` guards, so `en` never appeared in Verilog at all — the enable was **silently dropped** and the counter counted unconditionally (no error, wrong hardware).
 
-- **D flip-flop (hard error):** `variables: {q}`, `transitions: [{Capture, "TRUE", {q: "d"}}]`. After refinement Compiler 2 emitted `q <= d;` where `d` is never declared. `iverilog -Wall -t null` failed: `error: Unable to bind wire/reg/memory 'd' in 'dff'`.
-- **2-bit counter (silent, worse):** Tick guarded by `en = 1`. Because Compiler 2 does not translate guards in `UpdatePipeline`, `en` never appeared in emitted Verilog at all — the enable was *silently dropped* and the counter counted unconditionally (no error, wrong hardware).
+**Root cause:** `d`/`en` are free identifiers absent from `VARIABLES` entirely. Compiler 2 already infers an input port for any VARIABLES entry not driven by CombinationalLogic/UpdatePipeline (that is how `in_a`/`in_b` become inputs in `SAMPLE_TLA`), but it never *saw* `d`/`en`.
 
-**Root cause:** `d`/`en` are free identifiers absent from `VARIABLES` entirely. Compiler 2 already infers an input port for any VARIABLES entry not driven by CombinationalLogic/UpdatePipeline (that is how `in_a`/`in_b` become inputs in `SAMPLE_TLA`), but it never *saw* `d`/`en` because they were never declared.
+**Fix (primary in bridge, defensive guard in Compiler 2):**
+- **(A) Bridge — primary.** `engine_spec_to_rtl_tla` scans every action's update expressions and every *non-reset* action's guard for identifiers that are not a declared variable, not `clk`/`reset`, not a reserved word, and not a numeric literal, and injects them into `VARIABLES` (`\* width: 1`, sorted). Compiler 2's existing "not driven → input port" classifier then declares them, keeping its port model uniform. The reset action's own guard is deliberately excluded (the bridge replaces it with a hardcoded `IF reset = 1 THEN ...`, so the Initialization rule's formal guard `rst = TRUE` is never emitted — scanning it would manufacture a dangling `rst` port).
+- **(B) Compiler 2 — defensive.** `_undeclared_inputs` scans the translated RHS of every emitted assign/clocked assignment for undeclared identifiers and declares each as a scalar input, so Compiler 2 never emits a module referencing an undeclared wire even when the bridge is bypassed (hand-written TLA+). `/* FORMAL_ONLY */` block comments are stripped before the scan.
 
-**Fix applied (2026-06-02) — primary in the bridge (A) + defensive guard in Compiler 2 (B):**
-
-- **(A) Bridge — primary.** `engine_spec_to_rtl_tla` now scans every action's update expressions and every *non-reset* action's guard for identifiers that are not a declared variable, not `clk`/`reset`, not a TLA+/Verilog keyword (`_RESERVED_IDENTIFIERS`), and not a numeric literal. The free identifiers are injected into the `VARIABLES` block (default `\* width: 1`, consistent with the BUG-17 width-comment convention, sorted for determinism). Compiler 2's existing "not driven by either block → input port" classifier then declares them as inputs automatically — keeping its port model uniform (everything it ports is a VARIABLES entry). The reset action's *own* guard is deliberately excluded: the bridge replaces it with a hardcoded `IF reset = 1 THEN ...`, so the Initialization rule's formal guard `rst = TRUE` is never emitted, and scanning it would manufacture a dangling `rst` port.
-- **(B) Compiler 2 — defensive guard.** `_undeclared_inputs` scans the *translated* RHS of every emitted assign / clocked assignment for identifiers that are not declared, not `clk`/`reset`, not a reserved word, and not `hw_*`, and declares each as a scalar input. This guarantees Compiler 2 never emits a module referencing an undeclared wire even when the bridge is bypassed (hand-written TLA+ fed straight in). Block comments (`/* FORMAL_ONLY */`) are stripped before the scan so dropped formal-only markers are not mistaken for ports.
-
-Chose A as primary (the bridge owns the RTL-style TLA+ contract — it already injects `clk`/`reset` and the width comments) with B as a robustness net for the bridge-bypass path, exactly as the analysis recommended.
-
-**Verified:** new acceptance test `tests/test_dff.py` (the BUG-9 file) runs the hand-built DFF through `formal_spec_to_engine_spec → engine.run(stub) → engine_spec_to_rtl_tla → compile_tla_to_verilog` and asserts (1) `always @(posedge clk)` present, (2) `d` declared `input`, (3) `q` is `output reg`, (4) the Verilog **elaborates clean under `iverilog -Wall -t null` (exit 0)** — the criterion that catches BUG-18 — plus no-spurious-`rst`, determinism, the counter-`en`-declared regression, and the bridge-bypass defensive case. DFF is also `verilator --lint-only` clean. Full suite: 58 passed (was 50; +8).
+**Verified:** `tests/test_dff.py` runs the hand-built DFF through `formal_spec_to_engine_spec → engine.run(stub) → engine_spec_to_rtl_tla → compile_tla_to_verilog` and asserts `always @(posedge clk)` present, `d` declared `input`, `q` is `output reg`, **and the Verilog elaborates clean under `iverilog -Wall -t null` (exit 0)** — plus no-spurious-`rst`, determinism, the counter-`en`-declared regression, and the bridge-bypass defensive case. DFF is also `verilator --lint-only` clean. Independently re-derived: DFF + counter both declare their free inputs and elaborate clean; counter retains `[1:0]` width.
 
 ---
 
-### BUG-17 (FIXED): Bit width is dropped end-to-end → multi-bit signals truncate to 1 bit
+### BUG-17 (FIXED): Bit width dropped end-to-end → multi-bit signals truncate to 1 bit
 
-**Files:** `pipeline/refinement/bridge.py` (`formal_spec_to_engine_spec`, `engine_spec_to_rtl_tla`), `pipeline/refinement/rules/introduce_variable.py`, `pipeline/compilers/compiler2.py`
+**Files:** `pipeline/refinement/bridge.py` (`formal_spec_to_engine_spec`, `engine_spec_to_rtl_tla`), `pipeline/refinement/rules/introduce_variable.py`, `pipeline/compilers/compiler2.py`.
 
-**What was happening (found in this sweep — missing from the original audit):**
-A `FormalSpec` variable carries a declared `width` (e.g. `{count: {type: Nat, width: 2}}`), but that width was discarded on the way to RTL. `engine_spec_to_rtl_tla` emitted a bare `count` in the VARIABLES block, and Compiler 2 emitted `output reg count` / `count <= (count+1)%4` with **no `[1:0]` range**, so every multi-bit signal silently truncated to 1 bit. verilator flags this as `WIDTHTRUNC`; iverilog does not, so it could slip through. Root cause: the engine spec and the RTL-style TLA+ contract (VARIABLES / CombinationalLogic / UpdatePipeline) had no channel for variable width, and Compiler 2 had no width syntax.
+**What was happening (found in this sweep — missing from the original audit):** a `FormalSpec` variable carries a declared `width` (e.g. `{count: {type: Nat, width: 2}}`), but width was discarded on the way to RTL. `engine_spec_to_rtl_tla` emitted a bare `count`, and Compiler 2 emitted `output reg count` / `count <= ...` with **no `[1:0]` range**, so every multi-bit signal silently truncated to 1 bit. verilator flags `WIDTHTRUNC`; iverilog does not, so it could slip through.
 
-**Fix applied (2026-06-02):**
-Extended the bridge↔compiler2 contract to carry width:
-- `formal_spec_to_engine_spec` now copies `var.width` into each engine-spec variable; `IntroduceVariable` defaults/propagates a `width` field (default 1) so rule-introduced signals are sized too.
-- `engine_spec_to_rtl_tla` annotates each VARIABLES entry with a TLA+ comment `\* width: N` (invisible to TLC; `clk`/`reset` are always 1).
-- Compiler 2 (`extract_variables`) now captures the per-variable width from that comment *before* stripping comments, stores it in `self.widths`, and a new `_range()` helper emits a `[N-1:0]` prefix on input/output/`output reg` ports and internal regs when `N > 1` (scalar otherwise).
+**Fix:** extended the bridge↔compiler2 contract to carry width — `formal_spec_to_engine_spec` copies `var.width` into each engine-spec variable; `IntroduceVariable` propagates a `width` field (default 1) so rule-introduced signals are sized; `engine_spec_to_rtl_tla` annotates each VARIABLES entry with `\* width: N` (invisible to TLC; `clk`/`reset` always 1); Compiler 2's `extract_variables` captures that width before stripping comments and a `_range()` helper emits a `[N-1:0]` prefix when `N > 1` (scalar otherwise).
 
-**Verified:** new regression tests `test_bug17_width_carried_to_verilog_range` (asserts `output reg [1:0] count`) and `test_bug17_width2_counter_lint_clean_no_widthtrunc` (a width-2 counter that wraps via IF-THEN-ELSE lints clean under `verilator --lint-only`, no `WIDTHTRUNC`); full suite 50 passed.
+**Verified:** regression tests `test_bug17_width_carried_to_verilog_range` (asserts `output reg [1:0] count`) and `test_bug17_width2_counter_lint_clean_no_widthtrunc` (width-2 counter via IF-THEN-ELSE, `verilator --lint-only` clean, no `WIDTHTRUNC`).
 
-**Known residual (non-blocking lint note):** verilator still emits `WIDTHTRUNC` for the specific idiom `count <= (count + 1) % 4` (modulo by a power of two) even with the `[1:0]` range present — a verilator width-inference quirk on `% 2^k`, not a real truncation (the value provably fits). Refinement should prefer explicit-wrap (`IF count = MAX THEN 0 ELSE count + 1`) over `% 2^k` for sized counters; masking idioms (`& 2'bN`) were evaluated and found fragile/inconsistent across moduli, so they were not adopted. Sizing the port (the actual BUG-17 truncation defect) is fixed.
+**Residual (cosmetic, deferred):** verilator still warns `WIDTHTRUNC` for the `count <= (count + 1) % 4` idiom even with the `[1:0]` range — a verilator inference quirk on `% 2^k`, not a real truncation. With explicit-wrap (`IF count = 3 THEN 0 ELSE count + 1`) it is fully clean on both linters. See the deferred follow-up above.
 
 ---
 
-### BUG-3 (RESOLVED — won't fix; Anthropic SDK is intentional): Agent 3 uses the Anthropic SDK
+### BUG-3 (RESOLVED — won't fix; Anthropic SDK is intentional)
 
-**File:** `pipeline/agents/agent3.py:31,81`
+**File:** `pipeline/agents/agent3.py`.
 
-**Decision (2026-06-02):** Agent 3 **stays on the Anthropic SDK** with its own `ANTHROPIC_API_KEY`. This is a deliberate architecture choice (locked decision #3: Agent 3 is a distinct, tool-using Claude agent), not a defect. The key will be provisioned from a separate Anthropic account and added to `.env`.
-
-The original report's three concerns were re-examined and found not to justify a migration:
-- *"Bypasses the proxy"* — true, but by design; Agent 3 is intentionally a distinct agent.
-- *"No prompt caching"* — the Anthropic SDK supports caching too; this is a future enhancement, not a blocker.
-- *"Requires a second credential that may be unavailable"* — the only real operational concern, and it is resolved by provisioning a dedicated key rather than collapsing Agent 3 onto the proxy. Note the proxy *does* route to Claude (`LLM_MODEL=~anthropic/claude-sonnet-latest`), so "OpenAI SDK vs Claude" was a false dichotomy; the only real axis was transport, and we keep the direct Anthropic transport for Agent 3.
-
-No code change. The placeholder hard-error at `_get_api_key()` (agent3.py:60) is the intended guard until the real key is set.
+**Decision (2026-06-02):** Agent 3 **stays on the Anthropic SDK** with its own `ANTHROPIC_API_KEY` (locked decision #3: Agent 3 is a distinct, tool-using Claude agent). Not a defect. The original report's three concerns were re-examined: "bypasses the proxy" is by design; "no prompt caching" is a future enhancement (the Anthropic SDK supports caching); "requires a second credential" is the only real operational concern, resolved by provisioning a dedicated key (see *Setup still pending*) rather than collapsing Agent 3 onto the proxy. The proxy itself routes to Claude (`LLM_MODEL=~anthropic/...`), so "OpenAI SDK vs Claude" was a false dichotomy — the only real axis is transport, and Agent 3 keeps the direct Anthropic transport. No code change; the placeholder hard-error at `_get_api_key()` is the intended guard until the real key is set.
 
 ---
 
-### BUG-4 (FIXED): Passing `tools=[]` to the Anthropic SDK crashes on every `pick_rule` call
+### BUG-4 (FIXED): `tools=[]` crashes every `pick_rule` call
 
-**File:** `pipeline/agents/agent3.py:326` (was :331)
+**File:** `pipeline/agents/agent3.py` (the `pick_rule` `messages.create` call).
 
-**What was happening:**
-`pick_rule()` passed `tools=[]` (an explicitly empty list) to `client.messages.create()`. The Anthropic API treats the presence of the `tools` field as "tool-calling requested" and then rejects an empty list, so every `pick_rule` call raised an API validation error — making rule selection completely non-functional once a live key is present. The empty list was intended to *enforce* the bounded-action-space invariant (no tools on `pick_rule`); correct intent, wrong mechanism.
+**What was happening:** `pick_rule()` passed `tools=[]` to `client.messages.create()`. The Anthropic API treats the presence of `tools` as "tool-calling requested" then rejects an empty list, so every `pick_rule` call would raise an API validation error once a live key is present. The empty list was meant to *enforce* the bounded-action-space invariant (no tools on `pick_rule`) — correct intent, wrong mechanism.
 
-**Fix applied (2026-06-02):**
-Removed the `tools=[]` argument from the `client.messages.create()` call entirely. Omitting the field is what actually enforces "no tool surface" — and the API accepts it. The bounded-action-space invariant is preserved (arguably strengthened: there is now genuinely no tools field on the `pick_rule` call). A comment at the call site documents why the argument is omitted rather than passed empty. Verified the module still imports cleanly.
+**Fix:** removed the `tools=[]` argument entirely. Omitting the field is what actually enforces "no tool surface," and the API accepts it — the bounded-action-space invariant is preserved (arguably strengthened: there is now genuinely no tools field on the call). A comment documents why it is omitted rather than passed empty.
 
 ---
 
-## High — Broken behavior or wrong logic
+## High — fixed
+
+### BUG-6b (FIXED): `pick_rule` docstring documented the wrong field names
+
+**File:** `pipeline/agents/agent3.py`. The docstring claimed `applicable_rules` entries have keys `"rule_name"`/`"description"`; the engine actually sends `{"name", "describe"}`. Updated the docstring to the real keys and pointed at the engine site that builds them (`{"name": r.__class__.__name__, "describe": r.describe()}`). Docstring-only; runtime and invariant unchanged.
 
 ---
 
-### BUG-6b (FIXED): The `agent3.pick_rule` docstring documents the wrong field names
+## Medium — fixed
 
-**File:** `pipeline/agents/agent3.py:296–297`
+### BUG-8 (FIXED): `compiler2.py` docstring referenced the wrong stage/artifact
 
-**What's happening:**
-The `pick_rule()` docstring says `applicable_rules` entries have keys `"rule_name"` and `"description"`. The actual entries (built by the engine) have keys `"name"` and `"describe"`. The docstring is wrong and will mislead anyone maintaining the agent or the engine.
+**File:** `pipeline/compilers/compiler2.py`. Docstring claimed it reads "Stage 2 output, `02_pluscal_impl.json`". Corrected to state the input is RTL-style TLA+ produced in-memory by `bridge.engine_spec_to_rtl_tla()`, called from Stage 3 — not read from any artifact JSON. Docstring-only.
 
-**Fix applied (2026-06-02):**
-Updated the `pick_rule()` docstring to document the real keys `{"name": str, "describe": str}` and added a note pointing at the engine site that builds them (`{"name": r.__class__.__name__, "describe": r.describe()}`). Docstring-only — runtime behavior and the bounded-action-space invariant are unchanged. Verified `pipeline.agents.agent3` still imports cleanly.
+### BUG-9 (RESOLVED): `tests/test_dff.py` documented but missing
 
----
+**File:** previously absent; now `tests/test_dff.py`. CLAUDE.md documents `python3.11 tests/test_dff.py` as the DFF integration test; the file did not exist. Per the user's decision it was written as a **deterministic, NO-LLM** test that bypasses Agent 1/Agent 3 (hand-built DFF FormalSpec + stub `pick_rule`, mirroring `tests/test_refinement_convergence.py`), so it needs **no keys** and stays in the green suite. It doubles as the **acceptance test for BUG-18** (gates on `iverilog` elaborating the DFF clean). Runnable as a pytest module and via `python3.11 tests/test_dff.py` (dual-mode `__main__`), exactly as CLAUDE.md documents; the `iverilog` gate skips gracefully only if `iverilog` is genuinely absent.
 
-## Medium — Documentation errors, missing tests, schema gaps
+### BUG-10 (FIXED): CLAUDE.md artifact table mismatched the code
 
----
+**File:** `CLAUDE.md`. The table listed `01_formal_spec.json`/`02_pluscal_impl.json`, neither of which exists. Replaced with the authoritative map mirroring `pipeline/graph.py` (`00_nl_spec`, `01_summary`, `02_testbench_meta`/`02_testbench.py`, `02_formal_spec`, `03_rtl_output`, `04_evaluation`, `04_diagnosis`, `refinement_chain`), with a note that `02_formal_spec.json` is written by Stage 3 (the `02_` prefix is on-disk ordering). The optional `02→03_formal_spec.json` rename was left out of scope — filenames are kept exactly as the code uses them.
 
-### BUG-8 (FIXED): `compiler2.py` references the wrong stage and artifact in its docstring
+### BUG-13 (FIXED): No Pydantic guard on the `status` envelope
 
-**File:** `pipeline/compilers/compiler2.py:5–6`
+**Files:** `pipeline/schemas/envelope.py` (new); `pipeline/nodes/stage1.py`–`stage4.py`, `diagnose.py`; `pipeline/schemas/__init__.py`. LangGraph routes on the `"status"` field, but each stage hand-patched `dict["status"] = "..."` with no validation — a typo like `"sucess"` would silently misroute. Added `ArtifactEnvelope` (`status: Literal["success","error","partial"]`, `error: str | None`, `extra="allow"` so the payload passes through) plus `write_artifact()`/`write_error()` helpers; every status-bearing write now goes through them, so a bad status raises `ValidationError` at write time. The artifact-write contract is preserved (failure paths still always write). Verified by `tests/test_envelope.py` (incl. "invalid status → no file written"). Intentionally validates only the routing fields, not each stage's payload shape — a thin guard, not a per-stage schema.
 
-**What's happening:**
-The module docstring said it reads from "Stage 2 output, `02_pluscal_impl.json`". Stage 2 is the cocotb testbench generator — it has nothing to do with Compiler 2. Compiler 2 receives RTL-style TLA+ produced by the Refinement Engine inside Stage 3, and that content never directly corresponds to a single artifact filename (it is generated in memory by `bridge.engine_spec_to_rtl_tla()`).
+### BUG-N2 (FIXED): `stage2.py` docstring cited the deleted `agent2.py`
 
-**Fix applied (2026-06-02):**
-Corrected the module docstring to state that the input is RTL-style TLA+ produced in-memory by `pipeline/refinement/bridge.py:engine_spec_to_rtl_tla()`, called from Stage 3 (`pipeline/nodes/stage3.py`), and that it is not read from any single artifact JSON. Docstring-only. Verified `pipeline.compilers.compiler2` still imports cleanly.
+**File:** `pipeline/nodes/stage2.py`. Removed the `pipeline/agents/agent2.py` reference (real generator is `pipeline/cocotb/generator.py`) and relabeled the module header from "Agent 2 / cocotb testbench generator" to "deterministic cocotb testbench generator." Coordinated with BUG-5 (which deletes `agent2.py`). Docstring-only; `grep -rn "agent2" pipeline tests` → none.
 
 ---
 
-### BUG-9: `tests/test_dff.py` is documented but does not exist
+## Low — fixed
 
-**File:** `CLAUDE.md:109` — file missing from `tests/`
+### BUG-5 (FIXED): stale `agents/agent2.py` dead code
 
-**What's happening:**
-The CLAUDE.md developer guide documents the command `python3.11 tests/test_dff.py` as a key integration test for checking that a D flip-flop spec can flow through Stage 1 and Stage 3 (bypassing Stage 2). The file does not exist. Anyone following the setup guide will get a `ModuleNotFoundError`.
+Confirmed nothing imports it, then deleted `pipeline/agents/agent2.py`. Coordinated with BUG-N2 (docstring reference removed first).
 
-**Proposed fix:**
-Create `tests/test_dff.py` with a minimal integration test: feed a D flip-flop NL prompt through Stage 1 to get a `SpecSummary`, then through Stage 3 to get Verilog, and assert the output contains `always @(posedge clk)`. Alternatively, remove the reference from CLAUDE.md and mark the test as deferred.
+### BUG-N3 (FIXED): cocotb 1.x `units=` clock API
 
-**Status (2026-06-02): DEFERRED — needs a user decision.** A true Stage 1 + Stage 3 integration test cannot run offline/in-CI: Stage 1 (Agent 1) needs the proxy `LLM_*` keys and Stage 3 (Agent 3) needs `ANTHROPIC_API_KEY` (BUG-3 keeps the Anthropic SDK). The existing suite is fully deterministic and key-free, and we want to keep it that way.
+**File:** `pipeline/cocotb/generator.py`. Changed the `Clock(...)` and generated `Timer(...)` calls from the removed-in-2.x `units="ns"` to singular `unit="ns"`. Verified against installed **cocotb 2.0.1** via `tests/test_cocotb_roundtrip.py` (generate → iverilog build → vvp run; pass/fail/build-fail paths all green).
 
-**Recommendation:** write `tests/test_dff.py` but guard it with `pytest.mark.skipif` when the required keys are absent, so CI skips it and a developer with keys can run a real DFF round-trip. This keeps CLAUDE.md honest (the file exists, the command works) without making the green suite depend on live LLM calls. Do NOT simply delete the CLAUDE.md reference — that hides a documented integration entry point. Awaiting the user's go-ahead before creating the file.
+### BUG-14 (FIXED): TLA+ module footer shorter than header
 
-**Update (2026-06-02): RESOLVED.** `tests/test_dff.py` now exists. Per the user's decision it is a **deterministic, NO-LLM** integration test that bypasses Agent 1 / Agent 3 (hand-built DFF FormalSpec + deterministic stub `pick_rule`, mirroring `tests/test_refinement_convergence.py`), so it needs **no keys** and stays in the green suite — no `skipif` on keys was needed. It is also the **acceptance test for BUG-18**: it gates on `iverilog -Wall -t null` elaborating the DFF clean (exit 0), the criterion that catches the undeclared-`d` defect. Runnable both as a pytest module and via `python3.11 tests/test_dff.py` (dual-mode `__main__`), exactly as CLAUDE.md documents. The `iverilog` gate skips gracefully only if `iverilog` is genuinely absent.
+**Files:** `pipeline/compilers/compiler1.py`, `pipeline/refinement/bridge.py` (two emit sites). The footer formula gave `42 + len(name)` vs. the header's `49 + len(name)` — 7 chars short, which TLC may reject. Changed all three sites to `len(sep)*2 + len(name) + 9` so footer length equals header length. Regression tests assert `len(footer) >= len(header)` at each emitter.
 
----
+### BUG-15 (FIXED): `agent3.py` hardcoded model name
 
-### BUG-10 (FIXED): CLAUDE.md artifact table does not match the actual artifact chain
+**File:** `pipeline/agents/agent3.py`. Down-scoped from the audit (which assumed the rejected proxy migration). Made the env override the clear primary: `_AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL`, with `_DEFAULT_AGENT3_MODEL` documented as a sane default only, and a comment that this is Agent 3's dedicated Anthropic model — intentionally distinct from the proxy's `LLM_MODEL` (Agent 1). Do not collapse the two.
 
-**File:** `CLAUDE.md`, artifact chain table
+### BUG-16 (FIXED): runner subprocess missing `PYTHONPATH`
 
-**What's happening:**
-The table lists `01_formal_spec.json` as the Stage 1 output and `02_pluscal_impl.json` as the Stage 2 output. Neither file exists. The authoritative artifact map (documented in both `graph.py` and `stage1.py`) is:
-
-| File | Written by |
-|------|-----------|
-| `00_nl_spec.json` | `main.py` at run start |
-| `01_summary.json` | Stage 1 (Agent 1) |
-| `02_testbench_meta.json` + `02_testbench.py` | Stage 2 (cocotb generator) |
-| `02_formal_spec.json` | Stage 3 (Agent 3) |
-| `03_rtl_output.json` | Stage 3 (Compiler 2) |
-| `04_evaluation.json` | Stage 4 (cocotb runner) |
-| `refinement_chain.json` | Refinement Engine (inside Stage 3) |
-
-Note: the `02_formal_spec.json` name is also confusing because it is produced by Stage 3, not Stage 2. Renaming it to `03_formal_spec.json` would be cleaner.
-
-**Fix applied (2026-06-02):**
-Replaced the CLAUDE.md artifact-chain table with the authoritative map that mirrors `pipeline/graph.py` (`00_nl_spec`, `01_summary`, `02_testbench_meta`/`02_testbench.py`, `02_formal_spec`, `03_rtl_output`, `04_evaluation`, `04_diagnosis`, `refinement_chain`). Added a note that `02_formal_spec.json` is written by Stage 3 (the `02_` prefix is on-disk ordering, not the producing stage). The optional `02_→03_formal_spec.json` rename was deliberately left OUT OF SCOPE — filenames are kept exactly as the code uses them, so no `stage*.py`/`graph.py`/test changes were needed. Verified the new table matches the filenames referenced in `pipeline/graph.py` and `pipeline/nodes/stage1.py`.
+**File:** `pipeline/cocotb/runner.py`. Injected `"PYTHONPATH": str(Path(__file__).resolve().parents[2])` (repo root) into the subprocess env so the generated testbench can import `pipeline.*` even in a fresh shell. Verified end-to-end via `tests/test_cocotb_roundtrip.py` (cocotb 2.0.1).
 
 ---
 
-### BUG-13 (FIXED): No Pydantic schema validates the `status` envelope
+## CLAUDE.md doc drift (FIXED — caught by adversarial verification)
 
-**Files:** `pipeline/nodes/stage1.py:73`, `stage2.py:58`, `stage3.py:245`, `stage4.py:71`, etc.
-
-**What's happening:**
-LangGraph routes the entire pipeline based on the `"status"` field in each artifact JSON. But there is no Pydantic model for the outer `{"status": ..., "error": ...}` wrapper. Each stage manually patches the dict after calling `model_dump()`, like: `artifact["status"] = "success"`. A typo such as `"sucess"` or `"succes"` would be completely invisible and would silently cause LangGraph to route to the wrong branch (defaulting to `"error"` for any unrecognized string).
-
-**Fix applied (2026-06-02):**
-Added `pipeline/schemas/envelope.py` with `ArtifactEnvelope` (`status: Literal["success","error","partial"]`, `error: str | None = None`, `extra="allow"` so the stage payload passes through) plus helpers `validate_status()`, `write_artifact(path, data)`, and `write_error(path, msg)`. Every status-bearing write in `stage1`–`stage4` and the `diagnose` node now goes through `write_artifact`/`write_error`, which validates the envelope before the JSON touches disk — a typo'd status raises `ValidationError` at write time instead of silently misrouting. Exported the new names from `pipeline/schemas/__init__.py`. The artifact-write contract is preserved (failure paths still always write a status-bearing artifact). Verified with a new `tests/test_envelope.py` (7 cases incl. "invalid status → no file written") and the full suite (50 passed). Note: validating the *routing* fields only (status/error) leaves each stage's payload shape unconstrained, which is intentional — this is a thin guard, not a per-stage schema.
+The bug-fix sweep's own changes were adversarially verified; two stale CLAUDE.md claims were found and corrected:
+- **LLM-client section** said "Use the OpenAI-compatible SDK, not the `anthropic` SDK" with no carve-out — now contradicted by the ratified BUG-3 decision. Rewritten to split transports: Stages 1–2 + diagnoser use the OpenAI-compatible proxy; **Agent 3 uses the Anthropic SDK directly** (`ANTHROPIC_API_KEY`/`AGENT3_MODEL`).
+- **Code-style section** said schemas live in `pipeline/schemas.py` (a file). The code uses a `pipeline/schemas/` **package** (`summary_schema.py`, `tla_schema.py`, `envelope.py`, …). Corrected, and noted that `ArtifactEnvelope` validates the `status` field.
 
 ---
 
-### BUG-N2 (FIXED): `stage2.py` docstring incorrectly attributes the generator to `agent2.py`
+## Not bugs (recorded for clarity)
 
-**File:** `pipeline/nodes/stage2.py:9`
-
-**What's happening:**
-The module docstring says: "deterministic (template-based, no LLM call in the current implementation in `pipeline/agents/agent2.py` / `pipeline/cocotb/generator.py`)." The actual implementation used is `pipeline/cocotb/generator.py`, imported as `from pipeline.cocotb.generator import generate_testbench`. The `agent2.py` file is stale and unused. Citing it in the docstring implies it is active, which is misleading.
-
-**Fix applied (2026-06-02):**
-Removed the `pipeline/agents/agent2.py` reference from the `stage2.py` module docstring, leaving only `pipeline/cocotb/generator.py` (the real generator). Coordinated with BUG-5, which deletes `agent2.py` outright. Docstring-only. Verified no remaining references with `grep -rn "agent2" pipeline tests` (none) and that `pipeline.nodes.stage2` imports cleanly.
-
----
-
-## Low — Minor issues
-
----
-
-### BUG-5 (FIXED): `pipeline/agents/agent2.py` is stale dead code
-
-**File:** `pipeline/agents/agent2.py`
-
-**What's happening:**
-This file is an older copy of the testbench generator. It is never imported by anything in the pipeline — `stage2.py` correctly imports from `pipeline.cocotb.generator`. Additionally, `agent2.py` still uses `units="ns"` which is the cocotb 1.x API keyword; the current cocotb 2.x API uses `unit="ns"` (singular).
-
-**Fix applied (2026-06-02):**
-Confirmed nothing imports it (`grep -rn "agents.agent2\|agents import agent2\|agent2" pipeline tests` → no matches) and deleted `pipeline/agents/agent2.py`. Coordinated with BUG-N2 (docstring reference removed first). Full suite stays green (50 passed).
-
----
-
-### BUG-N3 (FIXED): `pipeline/cocotb/generator.py` uses the cocotb 1.x clock API
-
-**File:** `pipeline/cocotb/generator.py:14`
-
-**What's happening:**
-The generated testbench template uses `Clock(dut.clk, 10, units="ns")`. In cocotb 2.x, the correct keyword argument is `unit="ns"` (singular). The plural `units` was deprecated in cocotb 1.x and removed in 2.x. If cocotb 2.x is installed, every generated testbench will raise a `TypeError` when the clock is started.
-
-**Fix applied (2026-06-02):**
-Changed the `Clock(...)` call and all generated `Timer(...)` calls to the cocotb 2.x singular `unit="ns"`. Verified end-to-end against the installed **cocotb 2.0.1** by running `tests/test_cocotb_roundtrip.py` — all 4 roundtrip sub-tests pass (generate → iverilog build → vvp run, including pass/fail/build-fail paths), so generated testbenches no longer `TypeError` on the clock.
-
----
-
-### BUG-14 (FIXED): TLA+ module footer line is 7 characters shorter than the header
-
-**Files:** `pipeline/compilers/compiler1.py:298`, `pipeline/refinement/bridge.py:172`, `bridge.py:252`
-
-**What's happening:**
-TLA+ requires the closing `====` line to be at least as long as the opening `---- MODULE name ----` line. The header is constructed as `f"{sep} MODULE {name} {sep}"` where `sep = "-" * 20`, which gives a length of `20 + 8 + len(name) + 1 + 20 = 49 + len(name)`. The footer formula `len(sep) * 2 + len(name) + 2` gives `42 + len(name)` — which is 7 characters short. TLC may reject specs with a too-short footer.
-
-The same formula is used in all three places that emit TLA+ modules.
-
-**Fix applied (2026-06-02):**
-Changed the footer formula at all three emit sites (`compiler1.py:_emit_tla`, `bridge.py:engine_spec_to_rtl_tla`, `bridge.py:engine_spec_to_abstract_tla`) from `len(sep)*2 + len(name) + 2` to `len(sep)*2 + len(name) + 9` (9 = `len(" MODULE ") + len(" ")`), so the footer is exactly the header length. Added three regression tests (`test_bug14_*_footer_at_least_header`) asserting `len(footer) >= len(header)` for each emitter; all pass (50 in suite).
-
----
-
-### BUG-15 (FIXED): `agent3.py` hardcodes the model name
-
-**File:** `pipeline/agents/agent3.py:89`
-
-**What's happening:**
-The model is set as `_MODEL = "claude-opus-4-5"` with an env-var override via `AGENT3_MODEL`. The original audit assumed a migration to the proxy/OpenAI SDK, but BUG-3 was ratified as won't-fix (Agent 3 stays on the dedicated Anthropic SDK), so the proxy `LLM_MODEL` is intentionally NOT used here.
-
-**Fix applied (2026-06-02):**
-Down-scoped from the audit (which assumed the rejected proxy migration). Kept Agent 3 on its own Anthropic model but made the env override the clear primary: `_AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL`, where `_DEFAULT_AGENT3_MODEL` is now documented as a sane default only. Added a comment stating this is Agent 3's dedicated Anthropic model, intentionally distinct from the proxy's `LLM_MODEL` (used by Agent 1) — do not collapse the two. Verified `pipeline.agents.agent3` imports cleanly.
-
----
-
-### BUG-16 (FIXED): `runner.py` subprocess does not guarantee `PYTHONPATH` is set
-
-**File:** `pipeline/cocotb/runner.py:179`
-
-**What's happening:**
-The vvp subprocess inherits the parent process environment with `env = {**os.environ, **env_overrides}`. If the user runs `python main.py` without `PYTHONPATH` pointing to the repo root, the generated cocotb testbench will fail to import `pipeline.*` modules. This works on a developer machine that has set up the environment but silently breaks in a fresh environment.
-
-**Fix applied (2026-06-02):**
-Injected `"PYTHONPATH": str(Path(__file__).resolve().parents[2])` (the repo root) into the subprocess env dict so the generated testbench can always import `pipeline.*`, even in a fresh shell that never exported `PYTHONPATH`. Verified end-to-end via `tests/test_cocotb_roundtrip.py` (cocotb 2.0.1) — the vvp run imports and executes the generated testbench and all 4 sub-tests pass.
+- **BUG-1, BUG-2, BUG-6, BUG-7** — earlier seam fixes (FormalSpec↔engine bridge, cocotb retry handoff, `pick_rule` fallback key, engine output wiring), all resolved before this sweep.
+- **BUG-12** — `refinement_templates/` is **not** dead code: `stage3.py` imports all six pass configurations to structure the multi-pass refinement loop.
+- **`docs/handoff_runtime_agents.md`** still describes Agent 2 / `agent2.py` — this is a design-phase historical doc that predates the deletion, not a current error. BUG-5 records the deletion.
