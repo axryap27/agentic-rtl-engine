@@ -16,6 +16,7 @@ import json
 import traceback
 from pathlib import Path
 
+from pipeline.schemas.envelope import write_artifact
 from pipeline.state import PipelineState
 
 
@@ -35,16 +36,17 @@ def run_diagnose(state: PipelineState) -> PipelineState:
     try:
         from pipeline.agents import agent_diagnoser
         result = agent_diagnoser.diagnose(run_id)
-        diag_path.write_text(json.dumps({"status": "success", **result}, indent=2))
+        # Validate the status envelope (BUG-13) before writing.
+        write_artifact(diag_path, {"status": "success", **result})
         state["last_diagnosis"] = result.get("failure_type", "spec")
     except Exception as exc:
         msg = f"Diagnoser node failed: {exc}\n{traceback.format_exc()}"
-        diag_path.write_text(json.dumps({
+        write_artifact(diag_path, {
             "status":       "error",
             "error":        msg,
             "failure_type": "spec",
             "explanation":  "Diagnoser crashed; defaulting to spec revision.",
-        }, indent=2))
+        })
         state["last_diagnosis"] = "spec"
 
     return state
