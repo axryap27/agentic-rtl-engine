@@ -32,6 +32,94 @@ from pipeline.schemas.tla_schema import FormalSpec
 
 
 # ---------------------------------------------------------------------------
+# Free-input detection (BUG-18)
+# ---------------------------------------------------------------------------
+# An identifier that appears in an action guard or update expression but is NOT
+# a declared engine variable, clk/reset, or a TLA+/Verilog keyword is a "free
+# input" — an externally-driven port (e.g. `d` on a DFF, `en` on a counter).
+# Such identifiers never enter the VARIABLES block on their own, so Compiler 2
+# never sees them and emits Verilog that references an undeclared wire (iverilog
+# fails to bind it; worse, a guard-only `en` is silently dropped). We scan for
+# them here and inject them into VARIABLES so Compiler 2's existing
+# "not driven by either block → input port" classifier ports them automatically.
+#
+# The reserved set below intentionally mirrors the operators/keywords Compiler 2
+# already understands in its expression translator (compiler2.RTLTLACompiler):
+# the TLA+ surface keywords (IF/THEN/ELSE/TRUE/FALSE) plus the boolean/word
+# operators TLC allows. Numeric literals and the `'` primed-suffix are handled
+# by the identifier regex itself. Keep this list in sync with compiler2's
+# translator if new keyword forms are added there.
+
+#: TLA+ / Verilog reserved words that must NOT be misclassified as free inputs.
+_RESERVED_IDENTIFIERS: frozenset[str] = frozenset({
+    # TLA+ surface keywords used in RTL-style guards/expressions
+    "IF", "THEN", "ELSE", "TRUE", "FALSE",
+    "UNCHANGED", "CASE", "OTHER", "LET", "IN",
+    # Word-form boolean operators TLC accepts
+    "AND", "OR", "NOT",
+    # Module-level keywords (won't appear in expressions, but cheap to exclude)
+    "MODULE", "EXTENDS", "VARIABLES", "CONSTANTS", "CONSTANT", "VARIABLE",
+})
+
+#: Matches a TLA+/Verilog identifier (optionally primed). The trailing `'?`
+#: lets us strip a primed-suffix so `q'` and `q` are treated as the same name.
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*'?")
+
+
+def _scan_identifiers(expr: str) -> set[str]:
+    """Return the set of (unprimed) identifiers appearing in a TLA+ expression.
+
+    Numeric literals never match (the regex requires a leading letter/underscore).
+    A primed suffix (`x'`) is stripped so the primed and unprimed forms collapse
+    to one name.
+    """
+    found: set[str] = set()
+    for tok in _IDENT_RE.findall(expr or ""):
+        found.add(tok[:-1] if tok.endswith("'") else tok)
+    return found
+
+
+def _free_inputs(engine_spec: dict, declared: set[str]) -> list[str]:
+    """Collect free input identifiers across action guards and updates.
+
+    *declared* is the set of names that already have a declaration (engine
+    variables plus clk/reset). Any identifier referenced in a scanned guard or
+    update expression that is not declared and not reserved is a free input.
+
+    What is scanned mirrors what Compiler 2 can actually emit from this spec:
+
+      * Every update expression of every action (these become the RHS of
+        assign / non-blocking-assignment statements).
+      * The guard of every NON-reset action — a guard-only enable like `en = 1`
+        is a real external input even though Compiler 2 does not currently
+        translate the guard itself (declaring the port at least surfaces the
+        signal rather than silently dropping it; see BUG-18).
+
+    The reset action's own guard is deliberately NOT scanned. `engine_spec_to_
+    rtl_tla` replaces it with a hardcoded `IF reset = 1 THEN ...`, so the reset
+    action's formal guard (e.g. `rst = TRUE`, written by the Initialization
+    rule) never appears in emitted Verilog. Scanning it would manufacture a
+    dangling `rst` input port that nothing reads.
+
+    Returns the free inputs sorted for deterministic output.
+    """
+    reset_name = engine_spec.get("reset_action")
+    free: set[str] = set()
+    for action in engine_spec.get("actions", []):
+        exprs: list[str] = []
+        if action.get("name") != reset_name:
+            exprs.append(action.get("guard", "") or "")
+        for upd in action.get("updates", []):
+            exprs.append(upd.get("expression", "") or "")
+        for expr in exprs:
+            for ident in _scan_identifiers(expr):
+                if ident in declared or ident in _RESERVED_IDENTIFIERS:
+                    continue
+                free.add(ident)
+    return sorted(free)
+
+
+# ---------------------------------------------------------------------------
 # Forward bridge: FormalSpec → engine spec
 # ---------------------------------------------------------------------------
 
@@ -46,6 +134,10 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
         {
             "name": name,
             "type": var.type,
+            # Carry the declared bit width through the engine spec so the RTL
+            # emitter (engine_spec_to_rtl_tla → Compiler 2) can size the signal.
+            # Without this, multi-bit signals silently truncate to 1 bit (BUG-17).
+            "width": var.width,
             "abstract": True,
             "reset_value": None,
             "clocked": False,
@@ -113,12 +205,32 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
     lines.append("EXTENDS Integers")
     lines.append("")
 
-    # VARIABLES — engine vars plus the implicit clk and reset ports
-    var_names = [v["name"] for v in variables] + ["clk", "reset"]
+    # VARIABLES — engine vars plus the implicit clk and reset ports, plus any
+    # free input identifiers referenced in guards/updates (BUG-18).
+    # Each name carries its bit width as a TLA+ comment ("\* width: N") so
+    # Compiler 2 can size the signal (BUG-17). The comment is invisible to TLC
+    # and is stripped by Compiler 2 after the width is captured. clk and reset
+    # are always single-bit. Missing/zero width defaults to 1.
+    sized_vars = [
+        (v["name"], int(v.get("width") or 1)) for v in variables
+    ] + [("clk", 1), ("reset", 1)]
+
+    # Free inputs (BUG-18): identifiers used in guards/update expressions that
+    # are NOT declared variables, clk/reset, or TLA+ keywords. Without this they
+    # never reach the VARIABLES block, so Compiler 2 emits Verilog referencing an
+    # undeclared wire (e.g. `d` on a DFF -> iverilog "Unable to bind wire `d'";
+    # a guard-only `en` is silently dropped). Declaring them here lets Compiler
+    # 2's "not driven by either block -> input port" classifier expose them as
+    # inputs. Default width 1 — we do not invent multi-bit widths from a bare
+    # identifier reference. Sorted (by _free_inputs) for deterministic output.
+    declared = {name for name, _ in sized_vars}
+    free_inputs = _free_inputs(engine_spec, declared)
+    sized_vars += [(name, 1) for name in free_inputs]
+
     lines.append("VARIABLES")
-    for i, name in enumerate(var_names):
-        comma = "," if i < len(var_names) - 1 else ""
-        lines.append(f"    {name}{comma}")
+    for i, (name, width) in enumerate(sized_vars):
+        comma = "," if i < len(sized_vars) - 1 else ""
+        lines.append(f"    {name}{comma}  \\* width: {width}")
     lines.append("")
 
     # Init (emitted for completeness; Compiler 2 ignores it)
@@ -169,7 +281,9 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
     lines.append("")
 
     # Module footer
-    lines.append("=" * (len(sep) * 2 + len(module_name) + 2))
+    # Footer must be >= header length. Header is f"{sep} MODULE {module_name} {sep}"
+    # = len(sep)*2 + len(" MODULE ") + len(module_name) + len(" ") = len(sep)*2 + len(module_name) + 9.
+    lines.append("=" * (len(sep) * 2 + len(module_name) + 9))
 
     return "\n".join(lines)
 
@@ -249,7 +363,9 @@ def engine_spec_to_abstract_tla(engine_spec: dict, module_name: str) -> tuple[st
         lines.append(f"    {inv}")
         lines.append("")
 
-    lines.append("=" * (len(sep) * 2 + len(module_name) + 2))
+    # Footer must be >= header length (see header f"{sep} MODULE {module_name} {sep}"):
+    # len(sep)*2 + len(" MODULE ") + len(module_name) + len(" ") = len(sep)*2 + len(module_name) + 9.
+    lines.append("=" * (len(sep) * 2 + len(module_name) + 9))
 
     tla_source = "\n".join(lines)
 
