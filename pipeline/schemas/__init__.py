@@ -13,6 +13,13 @@
 
 from pipeline.schemas.summary_schema import SpecSummary, Port, TestVector
 from pipeline.schemas.tla_schema import FormalSpec, Variable, Transition
+from pipeline.schemas.envelope import (
+    ArtifactEnvelope,
+    ArtifactStatus,
+    validate_status,
+    write_artifact,
+    write_error,
+)
 
 __all__ = [
     # JSON(S) — produced by Agent 1, consumed by Agent 2 and Agent 3
@@ -23,4 +30,10 @@ __all__ = [
     "FormalSpec",
     "Variable",
     "Transition",
+    # Routing envelope — the status contract LangGraph routes on (BUG-13)
+    "ArtifactEnvelope",
+    "ArtifactStatus",
+    "validate_status",
+    "write_artifact",
+    "write_error",
 ]
