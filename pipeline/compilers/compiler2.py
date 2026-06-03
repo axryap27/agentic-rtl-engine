@@ -81,6 +81,46 @@ import sys
 from typing import Optional
 
 
+# ---------------------------------------------------------------------------
+# Undeclared-identifier defense (BUG-18)
+# ---------------------------------------------------------------------------
+# After expression translation, an emitted RHS contains only Verilog operators,
+# numeric literals, and identifiers. Any identifier that is not a declared
+# signal (and not a Verilog reserved word / leaked TLA+ keyword) is an
+# externally-driven input that was never declared — e.g. `d` on a hand-written
+# DFF spec fed straight to Compiler 2, bypassing the bridge. Emitting a module
+# that references such a wire produces un-elaboratable Verilog (iverilog:
+# "Unable to bind wire `d'"). This module's defensive pass declares any such
+# identifier as a scalar input so the emitted module always elaborates.
+#
+# The reserved set mirrors the surface keywords the bridge excludes
+# (bridge._RESERVED_IDENTIFIERS) plus Verilog primitives that can appear in a
+# translated expression (the ternary leaves no keywords, but a partially
+# translated nested IF can leak IF/THEN/ELSE — we must not declare those as
+# ports). Keep this in sync with the translator's vocabulary.
+
+_RESERVED_VERILOG_IDENTIFIERS: frozenset = frozenset({
+    # TLA+ keywords that may leak through a partial translation
+    "IF", "THEN", "ELSE", "TRUE", "FALSE", "UNCHANGED",
+    "CASE", "OTHER", "LET", "IN",
+    # Word-form boolean operators
+    "AND", "OR", "NOT",
+    # Verilog-2001 reserved words that could appear in an emitted RHS
+    "begin", "end", "posedge", "negedge", "assign", "reg", "wire",
+    "input", "output", "module", "endmodule", "always",
+})
+
+#: Identifier token (optionally primed); numeric literals never match.
+_VERILOG_IDENT_RE = re.compile(r"[A-Za-z_]\w*'?")
+
+
+def _scan_verilog_identifiers(expr: str) -> set:
+    """Return the set of (unprimed) identifiers in a (translated) expression."""
+    out: set = set()
+    for tok in _VERILOG_IDENT_RE.findall(expr or ""):
+        out.add(tok[:-1] if tok.endswith("'") else tok)
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Verilog-2001 banlist verifier
@@ -614,6 +654,54 @@ class RTLTLACompiler:
         return reset_assigns, normal_assigns
 
     # ------------------------------------------------------------------
+    # Step 5b: defensive undeclared-identifier detection (BUG-18)
+    # ------------------------------------------------------------------
+
+    def _undeclared_inputs(
+        self,
+        comb_lines: list[str],
+        reset_assigns: list[tuple[str, str]],
+        normal_assigns: list[tuple[str, str]],
+    ) -> list[str]:
+        """Return identifiers referenced in emitted RHS but never declared.
+
+        Scans the *translated* right-hand sides of every assign / clocked
+        assignment. Any identifier that is not a declared signal, not clk/reset,
+        and not a Verilog/TLA+ reserved word is an externally-driven input that
+        nothing in this module declares — so we surface it as a scalar input
+        port rather than emit an un-bindable wire (BUG-18). Returns the names
+        sorted for deterministic output.
+
+        This is a safety net for hand-written TLA+ fed directly to Compiler 2.
+        The primary fix lives in the bridge (free-input injection into
+        VARIABLES); this guarantees the property even when the bridge is bypassed.
+        """
+        # Every name this module declares: all VARIABLES entries (which become
+        # ports, internal regs, or are dropped) plus the fixed clk/reset.
+        declared: set = set(self.variables) | set(self._FIXED_INPUTS)
+
+        # Collect translated RHS text from both blocks. comb_lines are already
+        # translated ("    assign v = <vexpr>;"); the sequential assigns carry
+        # raw TLA+ exprs, so translate them the same way compile() will.
+        referenced: set = set()
+        for line in comb_lines:
+            m = re.match(r"\s*assign\s+\w+\s*=\s*(.*);", line)
+            if m:
+                referenced |= _scan_verilog_identifiers(_strip_comments(m.group(1)))
+        for _var, expr in reset_assigns + normal_assigns:
+            rhs = _strip_comments(self.translate_expr(expr))
+            referenced |= _scan_verilog_identifiers(rhs)
+
+        undeclared = {
+            ident
+            for ident in referenced
+            if ident not in declared
+            and ident not in _RESERVED_VERILOG_IDENTIFIERS
+            and not self._is_verify(ident)   # hw_* are intentionally dropped
+        }
+        return sorted(undeclared)
+
+    # ------------------------------------------------------------------
     # Step 6: emit Verilog-2001
     # ------------------------------------------------------------------
 
@@ -629,6 +717,17 @@ class RTLTLACompiler:
         output_wires  = [v for v in self.variables if classes[v] == "output_wire"]
         output_regs   = [v for v in self.variables if classes[v] == "output_reg"]
         internal_regs = [v for v in self.variables if classes[v] == "internal_reg"]
+
+        # --- Defensive undeclared-identifier pass (BUG-18) ---
+        # Catch identifiers referenced in the emitted expressions that were
+        # never declared in VARIABLES (e.g. hand-written TLA+ fed straight to
+        # Compiler 2, bypassing the bridge's free-input injection). Declare each
+        # as a scalar input so the module always elaborates rather than emitting
+        # an un-bindable wire. Sorted for deterministic output.
+        extra_inputs = self._undeclared_inputs(
+            comb_lines, reset_assigns, normal_assigns,
+        )
+        input_ports = input_ports + extra_inputs
 
         out: list[str] = []
 
