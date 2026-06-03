@@ -59,7 +59,7 @@ Every applied rule is logged to `refinement_chain.json`, giving a replayable pro
           fail ->  diagnoser classifies the fault and routes the fix
 ```
 
-Terms worth pinning down:
+Technical stack & key features:
 
 - **TLA+ / TLC**: the spec language, and its model checker. TLC explores the spec's state space for invariant violations; on a hit, Agent 3 revises the spec and Compiler 1 + TLC re-run.
 - **cocotb**: a Python-based HDL verification framework. The testbench is generated mechanically from the Stage 1 test vectors and run against the emitted RTL.
