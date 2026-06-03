@@ -2,8 +2,11 @@
 Compiler 2 — RTL-style TLA+ → Verilog-2001.
 
 This module is Compiler 2 in the agentic-rtl-engine pipeline.  It takes
-RTL-style TLA+ produced by the Refinement Engine (Stage 2 output,
-``02_pluscal_impl.json``) and emits synthesizable Verilog-2001.
+RTL-style TLA+ produced in-memory by
+``pipeline/refinement/bridge.py:engine_spec_to_rtl_tla()`` (called from
+Stage 3, ``pipeline/nodes/stage3.py``) and emits synthesizable Verilog-2001.
+This RTL-style TLA+ is generated in memory and is not read from any single
+artifact JSON file.
 
 Public entry point
 ------------------
@@ -317,6 +320,9 @@ class RTLTLACompiler:
     def __init__(self, tla_code: str):
         self.tla_code = tla_code
         self.variables: list[str] = []
+        # Per-variable bit width, captured from the "\* width: N" comment the
+        # bridge attaches to each VARIABLES entry (BUG-17). Defaults to 1.
+        self.widths: dict[str, int] = {}
         self.comb_vars: set[str] = set()   # driven by CombinationalLogic
         self.seq_vars: set[str] = set()    # driven by UpdatePipeline
 
@@ -373,10 +379,34 @@ class RTLTLACompiler:
         if not m:
             return []
         raw = m.group(1)
+        # Capture per-line "\* width: N" comments BEFORE stripping comments, so
+        # we can associate each width with the variable name on the same line
+        # (BUG-17). The bridge emits one variable per line as
+        #   "    <name>,  \* width: <N>".
+        for line in raw.split("\n"):
+            wm = re.search(r"\\\*\s*width:\s*(\d+)", line)
+            if not wm:
+                continue
+            # The variable name is the first \w+ token before the comment.
+            code_part = line.split("\\*", 1)[0]
+            nm = re.search(r"\b(\w+)\b", code_part)
+            if nm:
+                self.widths[nm.group(1)] = int(wm.group(1))
         raw = re.sub(r"\\\*[^\n]*", "", raw)          # strip \* comments
         raw = re.sub(r"\(\*[\s\S]*?\*\)", "", raw)    # strip (* *) comments
         self.variables = [t for t in re.split(r"[\s,]+", raw) if re.match(r"^\w+$", t or "")]
         return self.variables
+
+    def _range(self, v: str) -> str:
+        """Verilog bit-range prefix for a variable, e.g. '[1:0] '.
+
+        Returns '' for single-bit (width <= 1) signals so scalar declarations
+        stay clean. clk/reset are always scalar.
+        """
+        w = self.widths.get(v, 1)
+        if v in self._FIXED_INPUTS or w <= 1:
+            return ""
+        return f"[{w - 1}:0] "
 
     # ------------------------------------------------------------------
     # Step 2: expression translator
@@ -605,9 +635,9 @@ class RTLTLACompiler:
         # --- Module header with full inferred port list ---
         port_decls: list[str] = (
             ["    input  clk", "    input  reset"]
-            + [f"    input  {v}" for v in input_ports]
-            + [f"    output {v}" for v in output_wires]
-            + [f"    output reg {v}" for v in output_regs]
+            + [f"    input  {self._range(v)}{v}" for v in input_ports]
+            + [f"    output {self._range(v)}{v}" for v in output_wires]
+            + [f"    output reg {self._range(v)}{v}" for v in output_regs]
         )
         out.append(f"module {module_name} (")
         for i, decl in enumerate(port_decls):
@@ -618,7 +648,7 @@ class RTLTLACompiler:
         if internal_regs:
             out.append("    // Internal registers")
             for v in internal_regs:
-                out.append(f"    reg  {v};")
+                out.append(f"    reg  {self._range(v)}{v};")
             out.append("")
 
         # --- Combinational block ---
