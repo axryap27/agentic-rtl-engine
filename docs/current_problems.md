@@ -1,6 +1,6 @@
 # Current Problems
 
-Last updated: 2026-06-01 (diagnoser + routing wired up)  
+Last updated: 2026-06-02 (bug-fix sweep: BUG-5/6b/8/10/13/14/15/16/17/N2/N3 fixed; BUG-9 deferred)  
 Branch: pipeline-dev
 
 ---
@@ -27,6 +27,25 @@ Three new files implement a two-way failure classification and routing system th
 ---
 
 ## Critical — These break the pipeline entirely
+
+---
+
+### BUG-17 (FIXED): Bit width is dropped end-to-end → multi-bit signals truncate to 1 bit
+
+**Files:** `pipeline/refinement/bridge.py` (`formal_spec_to_engine_spec`, `engine_spec_to_rtl_tla`), `pipeline/refinement/rules/introduce_variable.py`, `pipeline/compilers/compiler2.py`
+
+**What was happening (found in this sweep — missing from the original audit):**
+A `FormalSpec` variable carries a declared `width` (e.g. `{count: {type: Nat, width: 2}}`), but that width was discarded on the way to RTL. `engine_spec_to_rtl_tla` emitted a bare `count` in the VARIABLES block, and Compiler 2 emitted `output reg count` / `count <= (count+1)%4` with **no `[1:0]` range**, so every multi-bit signal silently truncated to 1 bit. verilator flags this as `WIDTHTRUNC`; iverilog does not, so it could slip through. Root cause: the engine spec and the RTL-style TLA+ contract (VARIABLES / CombinationalLogic / UpdatePipeline) had no channel for variable width, and Compiler 2 had no width syntax.
+
+**Fix applied (2026-06-02):**
+Extended the bridge↔compiler2 contract to carry width:
+- `formal_spec_to_engine_spec` now copies `var.width` into each engine-spec variable; `IntroduceVariable` defaults/propagates a `width` field (default 1) so rule-introduced signals are sized too.
+- `engine_spec_to_rtl_tla` annotates each VARIABLES entry with a TLA+ comment `\* width: N` (invisible to TLC; `clk`/`reset` are always 1).
+- Compiler 2 (`extract_variables`) now captures the per-variable width from that comment *before* stripping comments, stores it in `self.widths`, and a new `_range()` helper emits a `[N-1:0]` prefix on input/output/`output reg` ports and internal regs when `N > 1` (scalar otherwise).
+
+**Verified:** new regression tests `test_bug17_width_carried_to_verilog_range` (asserts `output reg [1:0] count`) and `test_bug17_width2_counter_lint_clean_no_widthtrunc` (a width-2 counter that wraps via IF-THEN-ELSE lints clean under `verilator --lint-only`, no `WIDTHTRUNC`); full suite 50 passed.
+
+**Known residual (non-blocking lint note):** verilator still emits `WIDTHTRUNC` for the specific idiom `count <= (count + 1) % 4` (modulo by a power of two) even with the `[1:0]` range present — a verilator width-inference quirk on `% 2^k`, not a real truncation (the value provably fits). Refinement should prefer explicit-wrap (`IF count = MAX THEN 0 ELSE count + 1`) over `% 2^k` for sized counters; masking idioms (`& 2'bN`) were evaluated and found fragile/inconsistent across moduli, so they were not adopted. Sizing the port (the actual BUG-17 truncation defect) is fixed.
 
 ---
 
@@ -61,15 +80,15 @@ Removed the `tools=[]` argument from the `client.messages.create()` call entirel
 
 ---
 
-### BUG-6b: The `agent3.pick_rule` docstring documents the wrong field names
+### BUG-6b (FIXED): The `agent3.pick_rule` docstring documents the wrong field names
 
 **File:** `pipeline/agents/agent3.py:296–297`
 
 **What's happening:**
 The `pick_rule()` docstring says `applicable_rules` entries have keys `"rule_name"` and `"description"`. The actual entries (built by the engine) have keys `"name"` and `"describe"`. The docstring is wrong and will mislead anyone maintaining the agent or the engine.
 
-**Proposed fix:**
-Update the docstring to say `{"name": str, "describe": str}` to match what the engine actually sends.
+**Fix applied (2026-06-02):**
+Updated the `pick_rule()` docstring to document the real keys `{"name": str, "describe": str}` and added a note pointing at the engine site that builds them (`{"name": r.__class__.__name__, "describe": r.describe()}`). Docstring-only — runtime behavior and the bounded-action-space invariant are unchanged. Verified `pipeline.agents.agent3` still imports cleanly.
 
 ---
 
@@ -77,15 +96,15 @@ Update the docstring to say `{"name": str, "describe": str}` to match what the e
 
 ---
 
-### BUG-8: `compiler2.py` references the wrong stage and artifact in its docstring
+### BUG-8 (FIXED): `compiler2.py` references the wrong stage and artifact in its docstring
 
 **File:** `pipeline/compilers/compiler2.py:5–6`
 
 **What's happening:**
-The module docstring says it reads from "Stage 2 output, `02_pluscal_impl.json`". Stage 2 is the cocotb testbench generator — it has nothing to do with Compiler 2. Compiler 2 receives RTL-style TLA+ produced by the Refinement Engine inside Stage 3, and that content never directly corresponds to a single artifact filename (it is generated in memory by `bridge.engine_spec_to_rtl_tla()`).
+The module docstring said it reads from "Stage 2 output, `02_pluscal_impl.json`". Stage 2 is the cocotb testbench generator — it has nothing to do with Compiler 2. Compiler 2 receives RTL-style TLA+ produced by the Refinement Engine inside Stage 3, and that content never directly corresponds to a single artifact filename (it is generated in memory by `bridge.engine_spec_to_rtl_tla()`).
 
-**Proposed fix:**
-Update the docstring to say something like: "RTL-style TLA+ produced in-memory by `pipeline/refinement/bridge.py:engine_spec_to_rtl_tla()`, called from Stage 3 (`pipeline/nodes/stage3.py`)."
+**Fix applied (2026-06-02):**
+Corrected the module docstring to state that the input is RTL-style TLA+ produced in-memory by `pipeline/refinement/bridge.py:engine_spec_to_rtl_tla()`, called from Stage 3 (`pipeline/nodes/stage3.py`), and that it is not read from any single artifact JSON. Docstring-only. Verified `pipeline.compilers.compiler2` still imports cleanly.
 
 ---
 
@@ -99,9 +118,13 @@ The CLAUDE.md developer guide documents the command `python3.11 tests/test_dff.p
 **Proposed fix:**
 Create `tests/test_dff.py` with a minimal integration test: feed a D flip-flop NL prompt through Stage 1 to get a `SpecSummary`, then through Stage 3 to get Verilog, and assert the output contains `always @(posedge clk)`. Alternatively, remove the reference from CLAUDE.md and mark the test as deferred.
 
+**Status (2026-06-02): DEFERRED — needs a user decision.** A true Stage 1 + Stage 3 integration test cannot run offline/in-CI: Stage 1 (Agent 1) needs the proxy `LLM_*` keys and Stage 3 (Agent 3) needs `ANTHROPIC_API_KEY` (BUG-3 keeps the Anthropic SDK). The existing suite is fully deterministic and key-free, and we want to keep it that way.
+
+**Recommendation:** write `tests/test_dff.py` but guard it with `pytest.mark.skipif` when the required keys are absent, so CI skips it and a developer with keys can run a real DFF round-trip. This keeps CLAUDE.md honest (the file exists, the command works) without making the green suite depend on live LLM calls. Do NOT simply delete the CLAUDE.md reference — that hides a documented integration entry point. Awaiting the user's go-ahead before creating the file.
+
 ---
 
-### BUG-10: CLAUDE.md artifact table does not match the actual artifact chain
+### BUG-10 (FIXED): CLAUDE.md artifact table does not match the actual artifact chain
 
 **File:** `CLAUDE.md`, artifact chain table
 
@@ -120,32 +143,32 @@ The table lists `01_formal_spec.json` as the Stage 1 output and `02_pluscal_impl
 
 Note: the `02_formal_spec.json` name is also confusing because it is produced by Stage 3, not Stage 2. Renaming it to `03_formal_spec.json` would be cleaner.
 
-**Proposed fix:**
-Update the CLAUDE.md table to match the above. Optionally rename `02_formal_spec.json` to `03_formal_spec.json` and update all references in `stage1.py`, `stage3.py`, `graph.py`, and the tests.
+**Fix applied (2026-06-02):**
+Replaced the CLAUDE.md artifact-chain table with the authoritative map that mirrors `pipeline/graph.py` (`00_nl_spec`, `01_summary`, `02_testbench_meta`/`02_testbench.py`, `02_formal_spec`, `03_rtl_output`, `04_evaluation`, `04_diagnosis`, `refinement_chain`). Added a note that `02_formal_spec.json` is written by Stage 3 (the `02_` prefix is on-disk ordering, not the producing stage). The optional `02_→03_formal_spec.json` rename was deliberately left OUT OF SCOPE — filenames are kept exactly as the code uses them, so no `stage*.py`/`graph.py`/test changes were needed. Verified the new table matches the filenames referenced in `pipeline/graph.py` and `pipeline/nodes/stage1.py`.
 
 ---
 
-### BUG-13: No Pydantic schema validates the `status` envelope
+### BUG-13 (FIXED): No Pydantic schema validates the `status` envelope
 
 **Files:** `pipeline/nodes/stage1.py:73`, `stage2.py:58`, `stage3.py:245`, `stage4.py:71`, etc.
 
 **What's happening:**
 LangGraph routes the entire pipeline based on the `"status"` field in each artifact JSON. But there is no Pydantic model for the outer `{"status": ..., "error": ...}` wrapper. Each stage manually patches the dict after calling `model_dump()`, like: `artifact["status"] = "success"`. A typo such as `"sucess"` or `"succes"` would be completely invisible and would silently cause LangGraph to route to the wrong branch (defaulting to `"error"` for any unrecognized string).
 
-**Proposed fix:**
-Create a generic `ArtifactEnvelope` Pydantic v2 model with `status: Literal["success", "error", "partial"]` and `error: str | None = None`. Every stage should construct its artifact through this model, so Pydantic catches status typos at write time rather than at routing time.
+**Fix applied (2026-06-02):**
+Added `pipeline/schemas/envelope.py` with `ArtifactEnvelope` (`status: Literal["success","error","partial"]`, `error: str | None = None`, `extra="allow"` so the stage payload passes through) plus helpers `validate_status()`, `write_artifact(path, data)`, and `write_error(path, msg)`. Every status-bearing write in `stage1`–`stage4` and the `diagnose` node now goes through `write_artifact`/`write_error`, which validates the envelope before the JSON touches disk — a typo'd status raises `ValidationError` at write time instead of silently misrouting. Exported the new names from `pipeline/schemas/__init__.py`. The artifact-write contract is preserved (failure paths still always write a status-bearing artifact). Verified with a new `tests/test_envelope.py` (7 cases incl. "invalid status → no file written") and the full suite (50 passed). Note: validating the *routing* fields only (status/error) leaves each stage's payload shape unconstrained, which is intentional — this is a thin guard, not a per-stage schema.
 
 ---
 
-### BUG-N2: `stage2.py` docstring incorrectly attributes the generator to `agent2.py`
+### BUG-N2 (FIXED): `stage2.py` docstring incorrectly attributes the generator to `agent2.py`
 
 **File:** `pipeline/nodes/stage2.py:9`
 
 **What's happening:**
 The module docstring says: "deterministic (template-based, no LLM call in the current implementation in `pipeline/agents/agent2.py` / `pipeline/cocotb/generator.py`)." The actual implementation used is `pipeline/cocotb/generator.py`, imported as `from pipeline.cocotb.generator import generate_testbench`. The `agent2.py` file is stale and unused. Citing it in the docstring implies it is active, which is misleading.
 
-**Proposed fix:**
-Remove the `pipeline/agents/agent2.py` reference from the docstring.
+**Fix applied (2026-06-02):**
+Removed the `pipeline/agents/agent2.py` reference from the `stage2.py` module docstring, leaving only `pipeline/cocotb/generator.py` (the real generator). Coordinated with BUG-5, which deletes `agent2.py` outright. Docstring-only. Verified no remaining references with `grep -rn "agent2" pipeline tests` (none) and that `pipeline.nodes.stage2` imports cleanly.
 
 ---
 
@@ -153,31 +176,31 @@ Remove the `pipeline/agents/agent2.py` reference from the docstring.
 
 ---
 
-### BUG-5: `pipeline/agents/agent2.py` is stale dead code
+### BUG-5 (FIXED): `pipeline/agents/agent2.py` is stale dead code
 
 **File:** `pipeline/agents/agent2.py`
 
 **What's happening:**
 This file is an older copy of the testbench generator. It is never imported by anything in the pipeline — `stage2.py` correctly imports from `pipeline.cocotb.generator`. Additionally, `agent2.py` still uses `units="ns"` which is the cocotb 1.x API keyword; the current cocotb 2.x API uses `unit="ns"` (singular).
 
-**Proposed fix:**
-Delete `pipeline/agents/agent2.py`. It only causes confusion.
+**Fix applied (2026-06-02):**
+Confirmed nothing imports it (`grep -rn "agents.agent2\|agents import agent2\|agent2" pipeline tests` → no matches) and deleted `pipeline/agents/agent2.py`. Coordinated with BUG-N2 (docstring reference removed first). Full suite stays green (50 passed).
 
 ---
 
-### BUG-N3: `pipeline/cocotb/generator.py` uses the cocotb 1.x clock API
+### BUG-N3 (FIXED): `pipeline/cocotb/generator.py` uses the cocotb 1.x clock API
 
 **File:** `pipeline/cocotb/generator.py:14`
 
 **What's happening:**
 The generated testbench template uses `Clock(dut.clk, 10, units="ns")`. In cocotb 2.x, the correct keyword argument is `unit="ns"` (singular). The plural `units` was deprecated in cocotb 1.x and removed in 2.x. If cocotb 2.x is installed, every generated testbench will raise a `TypeError` when the clock is started.
 
-**Proposed fix:**
-Change `units="ns"` to `unit="ns"` on line 14 of `generator.py`.
+**Fix applied (2026-06-02):**
+Changed the `Clock(...)` call and all generated `Timer(...)` calls to the cocotb 2.x singular `unit="ns"`. Verified end-to-end against the installed **cocotb 2.0.1** by running `tests/test_cocotb_roundtrip.py` — all 4 roundtrip sub-tests pass (generate → iverilog build → vvp run, including pass/fail/build-fail paths), so generated testbenches no longer `TypeError` on the clock.
 
 ---
 
-### BUG-14: TLA+ module footer line is 7 characters shorter than the header
+### BUG-14 (FIXED): TLA+ module footer line is 7 characters shorter than the header
 
 **Files:** `pipeline/compilers/compiler1.py:298`, `pipeline/refinement/bridge.py:172`, `bridge.py:252`
 
@@ -186,32 +209,29 @@ TLA+ requires the closing `====` line to be at least as long as the opening `---
 
 The same formula is used in all three places that emit TLA+ modules.
 
-**Proposed fix:**
-Change the footer formula to `len(sep) * 2 + len(" MODULE ") + len(name) + len(" ") = 49 + len(name)`. In code: `"=" * (len(sep) * 2 + 9 + len(name))` (where 9 = len(" MODULE ") + len(" ")).
+**Fix applied (2026-06-02):**
+Changed the footer formula at all three emit sites (`compiler1.py:_emit_tla`, `bridge.py:engine_spec_to_rtl_tla`, `bridge.py:engine_spec_to_abstract_tla`) from `len(sep)*2 + len(name) + 2` to `len(sep)*2 + len(name) + 9` (9 = `len(" MODULE ") + len(" ")`), so the footer is exactly the header length. Added three regression tests (`test_bug14_*_footer_at_least_header`) asserting `len(footer) >= len(header)` for each emitter; all pass (50 in suite).
 
 ---
 
-### BUG-15: `agent3.py` hardcodes the model name
+### BUG-15 (FIXED): `agent3.py` hardcodes the model name
 
 **File:** `pipeline/agents/agent3.py:89`
 
 **What's happening:**
-The model is set as `_MODEL = "claude-opus-4-5"` with an env-var override via `AGENT3_MODEL`. Once BUG-3 is fixed (migrating to the OpenAI SDK), there should be only one model env variable (`LLM_MODEL`) with no hardcoded fallback, matching Agent 1's pattern.
+The model is set as `_MODEL = "claude-opus-4-5"` with an env-var override via `AGENT3_MODEL`. The original audit assumed a migration to the proxy/OpenAI SDK, but BUG-3 was ratified as won't-fix (Agent 3 stays on the dedicated Anthropic SDK), so the proxy `LLM_MODEL` is intentionally NOT used here.
 
-**Proposed fix:**
-After fixing BUG-3, remove `_MODEL` and replace `_AGENT3_MODEL` with `os.environ["LLM_MODEL"]` — same as Agent 1.
+**Fix applied (2026-06-02):**
+Down-scoped from the audit (which assumed the rejected proxy migration). Kept Agent 3 on its own Anthropic model but made the env override the clear primary: `_AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL`, where `_DEFAULT_AGENT3_MODEL` is now documented as a sane default only. Added a comment stating this is Agent 3's dedicated Anthropic model, intentionally distinct from the proxy's `LLM_MODEL` (used by Agent 1) — do not collapse the two. Verified `pipeline.agents.agent3` imports cleanly.
 
 ---
 
-### BUG-16: `runner.py` subprocess does not guarantee `PYTHONPATH` is set
+### BUG-16 (FIXED): `runner.py` subprocess does not guarantee `PYTHONPATH` is set
 
 **File:** `pipeline/cocotb/runner.py:179`
 
 **What's happening:**
 The vvp subprocess inherits the parent process environment with `env = {**os.environ, **env_overrides}`. If the user runs `python main.py` without `PYTHONPATH` pointing to the repo root, the generated cocotb testbench will fail to import `pipeline.*` modules. This works on a developer machine that has set up the environment but silently breaks in a fresh environment.
 
-**Proposed fix:**
-Explicitly inject `PYTHONPATH` into the subprocess environment. The repo root can be derived with `Path(__file__).resolve().parents[2]`. Add it to `env_overrides`:
-```python
-env_overrides["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
-```
+**Fix applied (2026-06-02):**
+Injected `"PYTHONPATH": str(Path(__file__).resolve().parents[2])` (the repo root) into the subprocess env dict so the generated testbench can always import `pipeline.*`, even in a fresh shell that never exported `PYTHONPATH`. Verified end-to-end via `tests/test_cocotb_roundtrip.py` (cocotb 2.0.1) — the vvp run imports and executes the generated testbench and all 4 sub-tests pass.
