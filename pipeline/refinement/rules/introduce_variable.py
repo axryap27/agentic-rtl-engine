@@ -31,6 +31,9 @@ class IntroduceVariable(RefinementRule):
         var_type: str = params["type"]
         abstract: bool = params.get("abstract", True)
         reset_value = params.get("reset_value", None)
+        # Default to single-bit; carried through to Compiler 2 so introduced
+        # signals are sized correctly rather than truncating to 1 bit (BUG-17).
+        width: int = params.get("width", 1)
 
         existing_names = {v["name"] for v in spec.get("variables", [])}
         if name in existing_names:
@@ -42,6 +45,7 @@ class IntroduceVariable(RefinementRule):
         new_var = {
             "name": name,
             "type": var_type,
+            "width": width,
             "abstract": abstract,
             "reset_value": reset_value,
             "clocked": False,
