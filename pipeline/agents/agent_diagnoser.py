@@ -37,6 +37,8 @@ from pathlib import Path
 
 import openai
 
+from pipeline.usage import log_usage
+
 _client: openai.OpenAI | None = None
 
 
@@ -176,6 +178,13 @@ Classify the root cause. Return the JSON object only.
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user",   "content": user_message},
             ],
+        )
+        # Record token usage to the local ledger (never raises).
+        log_usage(
+            agent="diagnoser",
+            model=model,
+            usage=getattr(response, "usage", None),
+            run_id=run_id,
         )
         raw = response.choices[0].message.content or ""
         result = json.loads(raw)
