@@ -22,6 +22,29 @@ import pytest
 from pipeline.agents import agent_diagnoser
 
 
+# diagnose() never raises in production: on any API failure it degrades to a
+# {"failure_type": "spec", ...} fallback so the router always has a signal. In a
+# LIVE test that silent degradation must surface as a FAILURE — otherwise a broken
+# proxy (wrong LLM_MODEL, 404, timeout) reads as green and these "live" tests pass
+# without ever reaching the model. These sentinels appear only in the fallback
+# explanations, never in a genuine LLM classification.
+_FALLBACK_SENTINELS = (
+    "Diagnoser LLM call failed",
+    "Could not read 04_evaluation.json",
+)
+
+
+def _assert_live_classification(result: dict) -> None:
+    """Fail if diagnose() returned its error fallback instead of a real answer."""
+    explanation = result.get("explanation") or ""
+    for sentinel in _FALLBACK_SENTINELS:
+        assert sentinel not in explanation, (
+            f"diagnose() returned its error fallback, not a live classification: "
+            f"{result!r}. The LLM call did not succeed — check LLM_MODEL / proxy "
+            f"reachability. A green assertion here would hide a broken proxy."
+        )
+
+
 def _seed_run(tmp_path: Path, run_id: str, eval_data: dict,
               formal_data: dict, chain: list) -> None:
     """Write the three artifacts diagnose() reads into a temp artifacts dir."""
@@ -67,6 +90,7 @@ def test_diagnose_returns_legal_classification(require_proxy, _in_tmp_cwd):
 
     result = agent_diagnoser.diagnose(run_id)
 
+    _assert_live_classification(result)  # fail (not pass) if the API call degraded to fallback
     assert isinstance(result, dict)
     assert result.get("failure_type") in ("spec", "refinement"), result
     assert "explanation" in result and result["explanation"]
@@ -103,6 +127,7 @@ def test_diagnose_wrong_reset_value_leans_refinement(require_proxy, _in_tmp_cwd)
     )
 
     result = agent_diagnoser.diagnose(run_id)
+    _assert_live_classification(result)  # don't let a 404 masquerade as a 'spec' verdict
     assert result.get("failure_type") in ("spec", "refinement"), result
 
 

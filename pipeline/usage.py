@@ -20,8 +20,8 @@ model rate. Set prices via environment variables (USD per 1M tokens):
     USAGE_PRICE_<MODELKEY>_OUT    output price per 1M tokens
 
 where ``<MODELKEY>`` is the model id upper-cased with every non-alphanumeric
-character replaced by ``_`` (e.g. model ``~anthropic/claude-sonnet-latest`` ->
-``_ANTHROPIC_CLAUDE_SONNET_LATEST``). If no price is set for a model, the entry
+character replaced by ``_`` (e.g. model ``anthropic/claude-sonnet-4.6`` ->
+``ANTHROPIC_CLAUDE_SONNET_4_6``). If no price is set for a model, the entry
 is logged with tokens only and ``cost_usd: null``.
 
 Design contract
