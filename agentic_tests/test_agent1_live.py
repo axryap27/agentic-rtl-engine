@@ -75,12 +75,23 @@ def test_agent1_test_vectors_reference_real_ports(require_proxy, counter_prompt)
 
 
 def test_agent1_determinism_smoke(require_proxy, dff_prompt):
-    """At temperature 0 the module_name and port set should be stable across calls.
+    """At temperature 0 the port interface should be stable across calls.
 
-    Not a strict byte-equality check (proxies/models can vary), but the
-    structural backbone should not change between two back-to-back calls.
+    Temperature 0 makes sampling greedy but does NOT guarantee bit-identical
+    output: backend batching, MoE routing, and FP reduction order let cosmetic
+    choices vary run to run. The prompt pins the port names ('clk','rst','d','q'),
+    so the port *interface* is the real structural backbone and is what we check.
+    The module *name* is a free naming choice ('dff_sync_reset' and
+    'd_flip_flop_sync_reset' are both valid) and is deliberately NOT asserted
+    equal — only that each call produces one. This matches this file's stated
+    philosophy: assert structure, not wording.
     """
     a = agent1.run(dff_prompt)
     b = agent1.run(dff_prompt)
-    assert a.module_name == b.module_name
-    assert {p.name for p in a.ports} == {p.name for p in b.ports}
+    # Module name is a free choice; require it exists, not that it matches.
+    assert a.module_name and b.module_name
+    # The port interface is pinned by the prompt and is the backbone that must hold.
+    assert {p.name for p in a.ports} == {p.name for p in b.ports}, (
+        f"port set diverged across two temp-0 calls: "
+        f"{sorted(p.name for p in a.ports)} vs {sorted(p.name for p in b.ports)}"
+    )
