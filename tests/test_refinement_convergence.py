@@ -115,26 +115,50 @@ _STEP_SEQUENCE: list[tuple[str, dict]] = [
     ),
 ]
 
-_step_index: int = 0  # global for the stub (reset before each test)
+def _step_already_applied(spec: dict, rule_name: str, params: dict) -> bool:
+    """
+    Return True if the effect of (rule_name, params) is already present in spec.
+
+    This lets the stub be an APPLICABILITY-DRIVEN, IDEMPOTENT pure function of
+    the spec — no module-global cursor. Each step in _STEP_SEQUENCE strictly
+    advances the counter toward RTL-style, so "already applied" is decidable by
+    inspecting the spec, and the same spec always maps to the same next choice.
+    (Replaces the former module-global `_step_index` cursor, per the project's
+    "no global mutable state" rule.)
+    """
+    if rule_name == "Initialization":
+        # Reset installed iff a reset action exists and all vars are reset.
+        if spec.get("reset_action") is None:
+            return False
+        return all(v.get("reset_value") is not None for v in spec.get("variables", []))
+    if rule_name == "Assignment":
+        action_name = params["action_name"]
+        action = next((a for a in spec.get("actions", []) if a["name"] == action_name), None)
+        return bool(action and action.get("updates"))
+    if rule_name == "Iteration":
+        action_name = params["action_name"]
+        action = next((a for a in spec.get("actions", []) if a["name"] == action_name), None)
+        return bool(action and action.get("clocked"))
+    return False
 
 
 def _stub_pick_rule(applicable_rules: list[dict], spec: dict) -> dict:
     """
-    Deterministic pick_rule stub.
+    Deterministic, applicability-driven pick_rule stub (no module-global state).
 
-    Walks the hardcoded _STEP_SEQUENCE in order; returns the next entry whose
-    rule name appears in the applicable set.  Falls back to the first
-    applicable rule with empty params if the sequence is exhausted (should
-    not happen for the counter).
+    Walks the hardcoded _STEP_SEQUENCE in order and returns the FIRST entry that
+    is (a) still applicable in the engine's applicable set and (b) not already
+    reflected in the current spec. Because it is a pure function of `spec`, the
+    same spec always yields the same choice — it can be safely shared across
+    multiple engine.run() calls without exhausting a counter.
+
+    Falls back to the first applicable rule with empty params if the sequence is
+    exhausted (should not happen for the counter — surfaces a stall clearly).
     """
-    global _step_index
     applicable_names = {r["name"] for r in applicable_rules}
 
-    # Try the hardcoded sequence
-    for i in range(_step_index, len(_STEP_SEQUENCE)):
-        rule_name, params = _STEP_SEQUENCE[i]
-        if rule_name in applicable_names:
-            _step_index = i + 1
+    for rule_name, params in _STEP_SEQUENCE:
+        if rule_name in applicable_names and not _step_already_applied(spec, rule_name, params):
             return {"rule_name": rule_name, "params": params}
 
     # Fallback: first applicable rule, no params (engine will likely reject or
@@ -274,9 +298,8 @@ def test_convergence_counter() -> None:
     - refinement_chain.json is written with >= 1 step.
     - Replay of chain from initial spec produces the same final spec (purity).
     """
-    global _step_index
-    _step_index = 0  # reset stub state
-
+    # The stub is now a pure function of the spec (applicability-driven), so it
+    # carries no cursor state to reset between tests.
     run_id = "test_counter_convergence"
     chain_path = pathlib.Path("artifacts") / run_id / "refinement_chain.json"
 
