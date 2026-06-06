@@ -228,7 +228,7 @@ def _run_to_rtl_style(engine_spec: dict, sequence: list[tuple[str, dict]], run_i
     """
     state = {"i": 0}
 
-    def stub_pick(applicable_rules: list[dict], spec: dict) -> dict:
+    def stub_pick(applicable_rules: list[dict], _spec: dict) -> dict:
         names = {r["name"] for r in applicable_rules}
         for j in range(state["i"], len(sequence)):
             rule_name, params = sequence[j]
