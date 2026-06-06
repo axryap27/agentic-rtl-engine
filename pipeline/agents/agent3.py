@@ -84,6 +84,34 @@ def _get_client() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# messages.create wrapper — adapt to models that dropped `temperature`
+# ---------------------------------------------------------------------------
+# Some models (e.g. Claude Opus 4.8) have DEPRECATED the `temperature` parameter
+# and return 400 if it is sent. We don't hardcode the list: the first time a
+# model rejects temperature we strip it, retry, and remember the model so later
+# calls omit it up front. A 400 is not billed, so the one-time probe is free.
+# This preserves temperature=0.0 (determinism) for models that still accept it.
+_NO_TEMPERATURE: set[str] = set()
+
+
+def _create(client: Any, **kwargs: Any) -> Any:
+    """client.messages.create that adapts to models lacking `temperature`."""
+    model = kwargs.get("model", "")
+    if model in _NO_TEMPERATURE:
+        kwargs.pop("temperature", None)
+    try:
+        return client.messages.create(**kwargs)
+    except _anthropic_module.APIStatusError as exc:
+        message = str(getattr(exc, "message", "") or exc).lower()
+        if (getattr(exc, "status_code", None) == 400
+                and "temperature" in message and "temperature" in kwargs):
+            _NO_TEMPERATURE.add(model)
+            kwargs.pop("temperature", None)
+            return client.messages.create(**kwargs)
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Model constant
 # ---------------------------------------------------------------------------
 
@@ -225,7 +253,8 @@ def _run_with_tools(user_message: str, call_type: str | None = None) -> str:
 
     while True:
         _check_budget()  # pre-flight: stop before exceeding the Agent 3 budget
-        response = client.messages.create(
+        response = _create(
+            client,
             model=_AGENT3_MODEL,
             max_tokens=4096,
             temperature=0.0,
@@ -378,7 +407,8 @@ No other text, no markdown. Return only the JSON object.
     # The `tools` argument is OMITTED entirely (not passed as []): the Anthropic
     # API rejects an explicitly empty tools list, and omitting it is what actually
     # enforces the bounded-action-space invariant (no tool surface on pick_rule).
-    response = client.messages.create(
+    response = _create(
+        client,
         model=_AGENT3_MODEL,
         max_tokens=512,
         temperature=0.0,

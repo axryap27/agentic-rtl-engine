@@ -69,7 +69,7 @@ model = os.environ["LLM_MODEL"]
 
 **Agent 3** is the deliberate exception: it uses the **Anthropic SDK directly** (`anthropic` package) with its own `ANTHROPIC_API_KEY` and `AGENT3_MODEL` (locked decision #3 — Agent 3 is a distinct, tool-using Claude agent). Do **not** collapse Agent 3 onto the proxy. See `pipeline/agents/agent3.py` and `docs/current_problems.md` (BUG-3) for the rationale. Note the proxy itself routes to Claude (`LLM_MODEL=anthropic/...`), so this is a transport split, not a model split.
 
-Always use `temperature=0.0` for code and spec generation. Always use `response_format={"type": "json_object"}` when expecting structured output (proxy calls) — Agent 3 enforces JSON via its prompt. System prompts are intentionally reused across retries for prompt caching — do not regenerate them per call.
+Always use `temperature=0.0` for code and spec generation (exception: some newer models such as Claude Opus 4.8 have deprecated `temperature` and return 400 if it is sent — Agent 3's `_create` wrapper auto-detects this, strips the parameter, and retries, so `temperature=0.0` stays the default wherever it is still supported). Always use `response_format={"type": "json_object"}` when expecting structured output (proxy calls) — Agent 3 enforces JSON via its prompt. System prompts are intentionally reused across retries for prompt caching — do not regenerate them per call.
 
 ---
 
