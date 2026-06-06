@@ -123,19 +123,13 @@ try:
             "system": pass5_mapping.SYSTEM,
             "max_steps": 20,
         },
-        # Pass 6 — refinement-correctness critic. A pure checker: it reports
-        # findings and emits NO rule application, so its allowed set is empty.
-        # With an empty allowed set the engine finds no applicable rule and the
-        # pass terminates cleanly without ever mutating the spec (true no-op
-        # critic). See the report flag: the critic SYSTEM prompt is NOT invoked
-        # through _engine_run because the engine only calls pick_rule when an
-        # allowed rule is applicable.
-        {
-            "name": "pass6_checker",
-            "allowed": set(),
-            "system": pass6_checker.SYSTEM,
-            "max_steps": 1,
-        },
+        # NOTE: pass6_checker is intentionally NOT an engine pass. It is a pure
+        # read-only refinement-correctness critic with no rule to "pick", so it
+        # cannot run inside the engine's pick_rule loop. It runs instead as a
+        # direct one-shot Agent-3 critic GATE (see _run_refinement_critic below
+        # and agent3.critique_refinement) that accepts/rejects the refined spec
+        # BEFORE Compiler 2. pass6_checker is still imported above for its SYSTEM
+        # prompt, which agent3.critique_refinement sends.
     ]
     _PASSES_AVAILABLE = True
 except Exception:
@@ -205,6 +199,40 @@ def _make_pass_termination(allowed: set[str]):
             if r.__class__.__name__ in allowed and r.is_applicable(s)
         )
     return _done
+
+
+def _run_refinement_critic(
+    abstract_engine_spec: dict, refined_engine_spec: dict
+) -> dict | None:
+    """
+    Run the pass6_checker refinement-correctness critic as a one-shot Agent-3 GATE.
+
+    This is the SINGLE, MOCKABLE boundary for the critic. Wave 2 tests stub THIS
+    function (`pipeline.nodes.stage3._run_refinement_critic`) — or the underlying
+    `pipeline.agents.agent3.critique_refinement` — to return accept/reject WITHOUT
+    a live LLM call. It makes NO live call unless actually invoked at the gate.
+
+    Returns:
+        The verdict dict {"verdict","issues","reasoning"} from the critic, or
+        None to mean "no verdict — proceed to compile" (used when Agent 3 is
+        unavailable, e.g. no ANTHROPIC_API_KEY, or the critic call itself errors).
+        The critic is an additive safety net: its UNAVAILABILITY must not halt an
+        otherwise-valid run, but an explicit 'reject' DOES halt (see the gate).
+    """
+    if not _AGENT3_AVAILABLE:
+        return None
+    try:
+        return _agent3.critique_refinement(
+            abstract_engine_spec,
+            refined_engine_spec,
+            abstraction_mapping=refined_engine_spec.get("abstraction_mapping", {}),
+        )
+    except Exception:
+        # Critic transport/parse failure — skip the gate rather than halt a run
+        # that otherwise refined cleanly. The verdict normaliser already fails
+        # closed on a PARSEABLE-but-bad response; this branch is only for the
+        # critic being unreachable. Proceeding here matches the no-key path.
+        return None
 
 
 def _make_pick_rule_callable(system_prompt: str | None = None):
@@ -285,10 +313,13 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
     # threw), the emitted Verilog is from the abstract spec, not the refined
     # one — that must be reported as 'partial', never 'success' (G07).
     refinement_ok = False
+    abstract_engine_spec: dict | None = None   # pre-refinement, for the critic gate
+    refined_engine_spec: dict | None = None    # post-refinement, for the critic gate
 
     if _ENGINE_AVAILABLE:
         try:
             current_spec = formal_spec_to_engine_spec(spec)
+            abstract_engine_spec = formal_spec_to_engine_spec(spec)  # frozen copy
             tlc_gate = _make_tlc_gate(spec.module_name)
             refinement_warnings: list[str] = []
 
@@ -320,6 +351,7 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
                 write_artifact(formal_path, formal_artifact)
 
             rtl_tla_source = engine_spec_to_rtl_tla(current_spec, spec.module_name)
+            refined_engine_spec = current_spec
             refinement_ok = True
 
         except Exception as exc:
@@ -329,6 +361,34 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
             formal_artifact["refinement_error"] = f"{exc}\n{traceback.format_exc()}"
             formal_artifact["status"] = "partial"
             write_artifact(formal_path, formal_artifact)
+
+    # ---- Refinement-correctness critic GATE (pass6_checker) ----
+    # Runs ONLY when refinement actually produced a refined spec. A read-only
+    # one-shot Agent-3 critic accepts/rejects the refinement BEFORE Compiler 2.
+    # On 'reject' we must NOT compile a bad refinement: write a non-success RTL
+    # artifact so _route_after_stage3 halts, with the critic's issues in `error`.
+    if refinement_ok and refined_engine_spec is not None and abstract_engine_spec is not None:
+        verdict = _run_refinement_critic(abstract_engine_spec, refined_engine_spec)
+        if verdict is not None and verdict.get("verdict") != "accept":
+            issues = verdict.get("issues", [])
+            reasoning = verdict.get("reasoning", "")
+            critic_msg = (
+                "Refinement-correctness critic REJECTED the refined spec; "
+                "compilation halted to avoid emitting unverified RTL. "
+                f"Issues: {issues}. Reasoning: {reasoning}"
+            )
+            # Record the verdict on the formal-spec artifact for debugging.
+            formal_artifact["status"] = "partial"
+            formal_artifact["critic_verdict"] = verdict
+            write_artifact(formal_path, formal_artifact)
+            # Write the routed artifact with a non-success status so the router
+            # halts (G07: 'partial' → halt). The honest error is on disk.
+            write_artifact(rtl_path, {
+                "status":      "partial",
+                "module_name": spec.module_name,
+                "error":       critic_msg,
+            })
+            return state
 
     # ---- Compiler 2 → Verilog-2001 ----
     if not _COMPILER2_AVAILABLE:
