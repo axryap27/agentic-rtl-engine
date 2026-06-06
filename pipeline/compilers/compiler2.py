@@ -727,7 +727,7 @@ class RTLTLACompiler:
             m = re.match(r"\s*assign\s+\w+\s*=\s*(.*);", line)
             if m:
                 referenced |= _scan_verilog_identifiers(_strip_comments(m.group(1)))
-        for _var, expr in reset_assigns + normal_assigns:
+        for _, expr in reset_assigns + normal_assigns:
             rhs = _strip_comments(self.translate_expr(expr))
             referenced |= _scan_verilog_identifiers(rhs)
 
