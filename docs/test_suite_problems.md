@@ -15,6 +15,58 @@
 
 ---
 
+## 1.5 Resolution Status — Wave 1 (fixes) + Wave 2 (tests) · updated 2026-06-06
+
+**Wave 1 (production fixes, committed in `564cf8a` / `7e59f79`):** all six confirmed bugs are fixed and proven by integration (a 3-branch FSM now emits a correct nested ternary, lints clean, and is rejected if multi-driven). **Wave 2 (deterministic test suite):** ~140 tests added across 9 files. **Suite now: 198 passed, 12 xfailed, 0 failed** (baseline was 58 passed). The 12 xfails are *newly discovered* bugs (D1–D5 below), deliberately captured but **not patched** (test-only wave).
+
+> **Revised bottom line:** the original blockers (G04/G05/G09/G10/G12/G13) are gone, but Wave 2's first real medium-tier fixtures surfaced **two new blockers** — **D1** (no `` `timescale `` → generated RTL can't be simulated end-to-end) and **D2** (free inputs forced to 1 bit → multi-bit buses truncate). The pipeline can now *emit* correct multi-branch RTL, but **still cannot be verified end-to-end on a medium design** until D1/D2 are fixed.
+
+### Bug fixes (Wave 1) — ✅ DONE
+
+| Gap | Fix | Where |
+|---|---|---|
+| **G12** | `branches`/`sequential_steps` composed into a nested ternary (no first-wins collapse) | `bridge.py`, `alternation.py`, `sequential_composition.py` |
+| **G13** | refinement chain accumulates across same-`run_id` passes (load-prefix + renumber) | `engine.py` |
+| **G04** | banlist catches uppercase TLA+ keywords + bare `FORMAL_ONLY` (no false-positive on lowercase Verilog) | `compiler2.py` |
+| **G05** | `MultiDriverError` raised when a var is driven by both comb + seq blocks | `compiler2.py` |
+| **G09** | pass templates' rule names reconciled with registry ⇄ `_PASS_CONFIGS` | `pass2_handshake.py`, `pass3_datapath.py`, `stage3.py` |
+| **G10** | `pass6_checker` became a real **direct Agent-3 critic gate** (5th call type, accept/reject→route); `pass5_mapping` wired as an engine pass; configs back to 5 passes | `agent3.py`, `stage3.py`, `pass6_checker.py` |
+| _bonus_ | `sequential_composition.apply()` purity (was mutating its input `params`) | `sequential_composition.py` |
+| _bonus_ | `_var` unused-binding lint nit | `compiler2.py` |
+
+### Test coverage added (Wave 2) — ✅ DONE
+
+| New / changed file | Tests | Covers |
+|---|---|---|
+| `tests/test_graph_routing.py` | 35 | **G06, G07** — routing tables, `_read_status` crash-shield, write-before-return, pass6 reject→halt |
+| `tests/test_pass_templates.py` | 41 | **G09, G10** — rule-name ⇄ registry ⇄ configs consistency; 5 passes; critic wired |
+| `tests/test_compiler2_correctness.py` | 22 | **G04, G05** + nested-ternary render |
+| `tests/test_branch_collapse.py` | 10 (+1 xfail) | **G12** — branches survive into RTL + functional sim |
+| `tests/test_refinement_backtrack.py` | 9 (+1 xfail) | **G08 det-half, G13** — backtrack machinery + chain reconstruction |
+| `tests/test_reverse_bridge.py` | 8 (+1 xfail) | **G11** — multi-var multi-bit bridge |
+| `tests/test_cocotb_roundtrip.py` | 7 | **G03** — converted to pytest; behavioral checks on **generated** RTL |
+| `tests/test_cocotb_generator.py` | 4 (+6 xfail) | **G14** — generator value/clk fragilities |
+| `tests/test_end_to_end_offline.py` | 4 (+3 xfail) | **G01, G02** — medium fixtures (traffic-light FSM, ALU) + full-graph offline |
+| `tests/test_refinement_convergence.py` | _modified_ | `_step_index` module-global removed → applicability-driven picker |
+
+### New discoveries (Wave 2) — ⚠️ OPEN bugs (captured as xfail, NOT patched)
+
+- **D1 — Compiler 2 emits no `` `timescale `` directive.** iverilog defaults to 1 s precision, so the cocotb generator's `Clock(dut.clk, 10, unit="ns")` is rejected → **no Compiler-2-generated module can be simulated end-to-end.** Blocks G01/G03 functional verification through the real pipeline. *Fix: emit `` `timescale 1ns/1ps `` in compiler2 (or a sim-safe period in the runner).* xfail in `test_branch_collapse`, `test_end_to_end_offline` (×2).
+- **D2 — free inputs sized at 1 bit.** `engine_spec_to_rtl_tla` can't infer a multi-bit width from a bare identifier, so any multi-bit external bus (UART rx data, FIFO write data, ALU operands) truncates / trips verilator `WIDTHEXPAND` → lint-clean-but-functionally-wrong RTL. *Fix: free-input width inference in the bridge.* xfail in `test_reverse_bridge`, `test_end_to_end_offline` (ALU).
+- **D3 — engine `__invalid__` 3-strike accounting keyed on an error-text set.** A picker that fails *identically* every call (the most common LLM stall — re-emitting the same bad rule name) yields one set entry, so `invalid_count` never reaches 3 and backtrack never fires; the engine spins to `MAX_STEPS`. *Fix: per-depth integer counter, not a set keyed on error text.* xfail in `test_refinement_backtrack`.
+- **D4 — injected `pick_rule` gets no excluded-choices argument** (flagged, not xfail). After a backtrack, a pure-of-spec picker re-picks the now-excluded choice and loops — a latent live-convergence risk.
+- **D5 — bridge drops the guard-only `en` enable from the counter** (G12-adjacent / BUG-18 lineage; noted while building the cocotb counter sim). `en` is declared as an input port but never woven into the next-state, so the counter advances unconditionally. *Worth confirming + fixing the guard→logic path.*
+
+### Still open / deferred
+
+- **G15** (usage-ledger tests) and **G16** (deterministic diagnoser tests) — deferred "batch 2", not yet written.
+- **G08 live half** — refinement-to-convergence with the *real* `pick_rule` (gated live test) still unwritten.
+- **D1–D5** — the new bugs above; candidates for the next fix wave (D1 + D2 are the medium-design end-to-end blockers).
+
+> Sections 2–7 below are the **original audit** (2026-06-06), preserved as the historical record of what was found before Wave 1/2.
+
+---
+
 ## 2. Coverage Matrix
 
 | Subsystem | Deterministic | Live | Level | Evidence |
