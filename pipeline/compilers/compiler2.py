@@ -138,6 +138,20 @@ class BanlistViolation(ValueError):
     """Raised when emitted Verilog contains a banned construct."""
 
 
+class MultiDriverError(ValueError):
+    """Raised when a variable is sourced by BOTH the combinational and the
+    sequential block (G05).
+
+    Such a variable would receive a continuous `assign` (from
+    CombinationalLogic) *and* a procedural `<=` (from UpdatePipeline) on the
+    same net -- an illegal multi-driver that fails elaboration
+    (iverilog: "cannot be driven by a continuous assignment";
+    verilator: BLKANDNBLK / MULTIDRIVEN). This is a build-time codegen error,
+    not a prompt-retry signal: the input spec is internally inconsistent and
+    must be fixed upstream, never emitted as a double-driver.
+    """
+
+
 # Each entry is (label, compiled_regex).  Regex applied to comment-stripped
 # source.  Word-boundary anchors prevent matching inside longer identifiers.
 _BANLIST: list[tuple[str, re.Pattern]] = [
@@ -161,6 +175,31 @@ _BANLIST: list[tuple[str, re.Pattern]] = [
      re.compile(r"#\s*\d")),
     ("'$' system task (simulation only)",
      re.compile(r"\$\w+")),
+    # --- Leaked TLA+ keywords (G04) ---
+    # These are CASE-SENSITIVE and uppercase-only: a translated expression
+    # never contains uppercase IF/THEN/ELSE/IN/LET/CASE (translate_expr lowers
+    # IF-THEN-ELSE into a ternary), so any surviving uppercase token is a
+    # non-synthesizable TLA+ construct that leaked past the translator.
+    # Lowercase Verilog `if`/`else`/`case`/`casez`/`casex` are legal inside
+    # always blocks and MUST NOT match -- hence no re.IGNORECASE.
+    ("leaked TLA+ keyword 'IF' (use lowercase if / a ternary)",
+     re.compile(r"\bIF\b")),
+    ("leaked TLA+ keyword 'THEN' (untranslated IF-THEN-ELSE)",
+     re.compile(r"\bTHEN\b")),
+    ("leaked TLA+ keyword 'ELSE' (use lowercase else / a ternary)",
+     re.compile(r"\bELSE\b")),
+    ("leaked TLA+ keyword 'IN' (untranslated LET ... IN)",
+     re.compile(r"\bIN\b")),
+    ("leaked TLA+ keyword 'LET' (no synthesizable equivalent)",
+     re.compile(r"\bLET\b")),
+    ("leaked TLA+ keyword 'CASE' (untranslated TLA+ CASE; lowercase case is legal)",
+     re.compile(r"\bCASE\b")),
+    # Bare FORMAL_ONLY operand: the translator only ever emits FORMAL_ONLY
+    # wrapped in a /* ... */ comment, which _strip_comments removes before
+    # matching. A bare FORMAL_ONLY surviving comment-stripping means a
+    # formal-only construct leaked into synthesizable code as an operand.
+    ("bare 'FORMAL_ONLY' operand (formal-only construct leaked into RTL)",
+     re.compile(r"\bFORMAL_ONLY\b")),
 ]
 
 
@@ -709,6 +748,23 @@ class RTLTLACompiler:
         self.extract_variables()
         comb_lines = self.parse_combinational()   # populates self.comb_vars
         reset_assigns, normal_assigns = self.parse_sequential()  # populates self.seq_vars
+
+        # --- Multi-driver conflict detection (G05) ---
+        # A variable driven by BOTH blocks would get a continuous `assign`
+        # (from CombinationalLogic) and a procedural `<=` (from UpdatePipeline)
+        # on the same net -- an illegal double-driver. _classify silently
+        # resolves the overlap to "output_reg" (seq wins), but the emit path
+        # still writes the assign, producing un-elaboratable Verilog. Refuse at
+        # build time rather than emit a multi-driver.
+        conflicts = sorted(self.comb_vars & self.seq_vars)
+        if conflicts:
+            raise MultiDriverError(
+                "Multi-driver conflict -- variable(s) "
+                f"{', '.join(conflicts)} are driven by BOTH CombinationalLogic "
+                "(continuous assign) AND UpdatePipeline (clocked <=). "
+                "A net cannot have two drivers; drive each signal from exactly "
+                "one block."
+            )
 
         # Classify every variable now that comb_vars and seq_vars are known
         classes = {v: self._classify(v) for v in self.variables}

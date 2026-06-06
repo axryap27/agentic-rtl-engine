@@ -7,8 +7,8 @@ an interface. Define fire and stall conditions and stability constraints.
 Do not alter the high-level functional behavior introduced in Pass 1.
 
 ALLOWED RULES
-- Strengthen During
-- Piping Composition
+- Alternation
+- IntroduceVariable
 
 PRECONDITIONS (check before acting)
 - Explicit FSM control states and transitions already exist (Pass 1 completed).
@@ -44,7 +44,7 @@ Return a single JSON object. Do not include any text outside the JSON.
 
 {
   "pass_name": "handshake_refinement",
-  "rule_used": "<StrengthenDuring | PipingComposition>",
+  "rule_used": "<Alternation | IntroduceVariable>",
   "status": "<success | blocked | fail>",
   "diff_summary": "<one sentence describing what changed>",
   "changed_symbols": [],

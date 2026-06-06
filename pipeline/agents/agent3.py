@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 try:
@@ -304,6 +305,59 @@ def _run_with_tools(user_message: str, call_type: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Robust JSON extraction from model output
+# ---------------------------------------------------------------------------
+# Opus 4.8 is a reasoning model and sometimes prepends an explanation before the
+# JSON on the revise_* calls, despite the system prompt's "JSON only" rule. Parse
+# defensively: strict parse first, then strip a markdown fence, then extract the
+# first balanced {...} object (string-aware, so braces inside string values do
+# not throw off the depth count). Prose has no braces, so it is skipped.
+
+def _extract_json(text: str) -> dict:
+    """Parse a JSON object from model output that may include prose or fences."""
+    s = (text or "").strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    if s.startswith("```"):
+        inner = re.sub(r"^```[A-Za-z0-9]*\s*\n?", "", s)
+        inner = re.sub(r"\n?```\s*$", "", inner).strip()
+        try:
+            return json.loads(inner)
+        except json.JSONDecodeError:
+            s = inner
+
+    start = s.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(s[start:i + 1])
+
+    raise ValueError(
+        f"Agent 3 returned no parseable JSON object. First 200 chars: {s[:200]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -325,7 +379,7 @@ SpecSummary:
 Return a single JSON object matching the FormalSpec schema. No other text.
 """
     raw = _run_with_tools(user_message, call_type="generate_formal_spec")
-    data = json.loads(raw)
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)
 
 
@@ -354,7 +408,7 @@ TLC errors:
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
     raw = _run_with_tools(user_message, call_type="revise_on_tlc")
-    data = json.loads(raw)
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)
 
 
@@ -430,7 +484,7 @@ No other text, no markdown. Return only the JSON object.
             raw += block.text
 
     raw = raw.strip()
-    result = json.loads(raw)
+    result = _extract_json(raw)
 
     # Validate shape
     if "rule_name" not in result or "params" not in result:
@@ -471,5 +525,5 @@ Cocotb simulation log:
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
     raw = _run_with_tools(user_message, call_type="revise_on_cocotb")
-    data = json.loads(raw)
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)

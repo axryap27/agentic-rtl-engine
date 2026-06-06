@@ -140,6 +140,17 @@ def _save_chain(run_id: str, chain: list[dict]) -> None:
         json.dump(chain, f, indent=2)
 
 
+def _renumber_steps(chain: list[dict]) -> list[dict]:
+    """Return *chain* with globally-monotonic ``step`` indices (0..n-1).
+
+    Replay (``_replay_chain``) ignores the ``step`` field entirely, so this is
+    purely cosmetic for on-disk readability and ``/trace-refinement``. Used when
+    concatenating a same-run_id committed prefix with a new pass's steps so the
+    persisted chain reads as one continuous sequence (G13).
+    """
+    return [{**step, "step": i} for i, step in enumerate(chain)]
+
+
 # ---------------------------------------------------------------------------
 # Chain replay (backtracking substrate)
 # ---------------------------------------------------------------------------
@@ -292,7 +303,25 @@ def run(
         r.__class__.__name__: r for r in RULE_REGISTRY
     }
 
-    # committed chain: list of {"step", "rule_name", "params", "pre_hash", "post_hash"}
+    # G13: Stage 3 calls run() once per structured pass with the SAME run_id,
+    # threading the refined spec in memory between calls. The on-disk chain must
+    # ACCUMULATE across those passes so that _replay_chain(initial_abstract_spec,
+    # on_disk_chain) reconstructs the FINAL multi-pass spec — not just the last
+    # pass. We load whatever prior passes already committed and treat it as an
+    # immutable prefix: this pass appends after it and never backtracks into it.
+    #
+    # Correctness of concatenation: each pass starts from the previous pass's
+    # output spec (passed in as `formal_spec`), which by purity equals
+    # replay(initial, committed_prefix). So replay(initial, prefix + this_pass)
+    # == apply(this_pass) on `formal_spec`. The prefix steps are relative to the
+    # initial spec; this pass's steps are relative to `formal_spec`; appended in
+    # order they replay correctly from the initial spec.
+    committed_prefix: list[dict] = _load_chain(run_id)
+
+    # committed chain for THIS pass: list of
+    # {"step", "rule_name", "params", "pre_hash", "post_hash"}.
+    # Backtracking operates only over this pass's steps (replayed from
+    # `formal_spec`); the prefix is never rolled back.
     chain: list[dict] = []
     # excluded set keyed by chain depth: excluded_at[depth] = set of (rule_name, params_json)
     excluded_at: dict[int, set[tuple[str, str]]] = {}
@@ -394,7 +423,9 @@ def run(
             "post_hash": post_hash,
         }
         chain.append(step)
-        _save_chain(run_id, chain)
+        # Persist the accumulated chain (prior passes + this pass), renumbered
+        # to a single monotonic sequence for on-disk readability (G13).
+        _save_chain(run_id, _renumber_steps(committed_prefix + chain))
 
         spec = new_spec
 

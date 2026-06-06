@@ -30,7 +30,10 @@ class SequentialComposition(RefinementRule):
 
     def apply(self, spec: dict, params: dict) -> dict:
         action_name: str = params["action_name"]
-        steps: list[dict] = params["steps"]
+        # Deepcopy up front so we never mutate the caller's params: the engine
+        # writes these exact params into refinement_chain.json and replays them
+        # to backtrack, so apply() must leave its inputs untouched.
+        steps: list[dict] = copy.deepcopy(params["steps"])
 
         result = copy.deepcopy(spec)
 
@@ -40,8 +43,14 @@ class SequentialComposition(RefinementRule):
                 if steps and not steps[0].get("guard"):
                     steps[0]["guard"] = action.get("guard", "TRUE")
                 action["sequential_steps"] = copy.deepcopy(steps)
-                # Replace the flat updates with the union of all step updates
-                # so the action still represents its full effect.
+                # The flat `updates` list is only a FRAME summary (one entry per
+                # variable this action touches) used by is_rtl_style and by
+                # other rules' applicability checks. It is NOT the source of the
+                # emitted next-state: the bridge composes the real per-variable
+                # RHS from `sequential_steps` by ordered substitution so that
+                # successive steps assigning the SAME variable all survive into
+                # RTL (G12). Keeping one entry per variable here is therefore
+                # safe — the per-step exprs are reconstructed downstream.
                 merged_updates = []
                 seen = set()
                 for step in steps:

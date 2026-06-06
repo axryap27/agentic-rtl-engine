@@ -7,7 +7,7 @@ a concrete expression. Report gaps or inconsistencies. Do not change any
 transition behavior.
 
 ALLOWED RULES
-- Mapping completion only (no behavioral rewrite permitted)
+- IntroduceVariable (only to supply a missing mapping symbol; no behavioral rewrite permitted)
 
 PRECONDITIONS (check before acting)
 - Concrete behavior is fully present: control (Pass 1), handshake (Pass 2),
@@ -43,7 +43,7 @@ Return a single JSON object. Do not include any text outside the JSON.
 
 {
   "pass_name": "mapping_completion",
-  "rule_used": "MappingCompletion",
+  "rule_used": "IntroduceVariable",
   "status": "<success | blocked | fail>",
   "diff_summary": "<one sentence describing what was audited>",
   "changed_symbols": [],

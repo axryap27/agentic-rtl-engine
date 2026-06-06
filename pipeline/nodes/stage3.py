@@ -87,6 +87,8 @@ try:
         pass2_handshake,
         pass3_datapath,
         pass4_reset,
+        pass5_mapping,
+        pass6_checker,
     )
     _PASS_CONFIGS: list[dict] = [
         {
@@ -112,6 +114,27 @@ try:
             "allowed": {"Initialization"},
             "system": pass4_reset.SYSTEM,
             "max_steps": 20,
+        },
+        # Pass 5 — mapping-completeness audit. May only supply a missing
+        # mapping symbol (IntroduceVariable); no behavioral rewrite permitted.
+        {
+            "name": "pass5_mapping",
+            "allowed": {"IntroduceVariable"},
+            "system": pass5_mapping.SYSTEM,
+            "max_steps": 20,
+        },
+        # Pass 6 — refinement-correctness critic. A pure checker: it reports
+        # findings and emits NO rule application, so its allowed set is empty.
+        # With an empty allowed set the engine finds no applicable rule and the
+        # pass terminates cleanly without ever mutating the spec (true no-op
+        # critic). See the report flag: the critic SYSTEM prompt is NOT invoked
+        # through _engine_run because the engine only calls pick_rule when an
+        # allowed rule is applicable.
+        {
+            "name": "pass6_checker",
+            "allowed": set(),
+            "system": pass6_checker.SYSTEM,
+            "max_steps": 1,
         },
     ]
     _PASSES_AVAILABLE = True
@@ -257,6 +280,11 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
 
     # ---- Refinement Engine ----
     rtl_tla_source = tla_source   # fallback if engine fails
+    # refinement_ok stays False until the engine actually produces RTL-style
+    # TLA+. If we fall back to the UNREFINED tla_source (engine unavailable or
+    # threw), the emitted Verilog is from the abstract spec, not the refined
+    # one — that must be reported as 'partial', never 'success' (G07).
+    refinement_ok = False
 
     if _ENGINE_AVAILABLE:
         try:
@@ -292,8 +320,12 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
                 write_artifact(formal_path, formal_artifact)
 
             rtl_tla_source = engine_spec_to_rtl_tla(current_spec, spec.module_name)
+            refinement_ok = True
 
         except Exception as exc:
+            # Refinement threw. rtl_tla_source stays the UNREFINED fallback and
+            # refinement_ok stays False, so the RTL artifact below is written
+            # 'partial' (G07) — the Verilog will be from the abstract spec.
             formal_artifact["refinement_error"] = f"{exc}\n{traceback.format_exc()}"
             formal_artifact["status"] = "partial"
             write_artifact(formal_path, formal_artifact)
@@ -312,12 +344,21 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
-        write_artifact(rtl_path, {
-            "status":       "success",
+        # G07: only 'success' when refinement actually ran. If we fell back to
+        # the unrefined tla_source, the RTL is from the abstract spec → 'partial'.
+        rtl_artifact = {
+            "status":       "success" if refinement_ok else "partial",
             "module_name":  spec.module_name,
             "verilog_path": str(verilog_file),
             "verilog":      verilog,
-        })
+        }
+        if not refinement_ok:
+            rtl_artifact["error"] = (
+                "RTL compiled from the UNREFINED/abstract TLA+ spec because the "
+                "refinement engine was unavailable or failed; this output is not "
+                "from a completed refinement and must not be treated as verified."
+            )
+        write_artifact(rtl_path, rtl_artifact)
     except Exception as exc:
         _write_error(rtl_path, f"Compiler 2 failed: {exc}\n{traceback.format_exc()}")
 

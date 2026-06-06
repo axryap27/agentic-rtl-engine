@@ -79,6 +79,169 @@ def _scan_identifiers(expr: str) -> set[str]:
     return found
 
 
+# ---------------------------------------------------------------------------
+# Multi-branch / multi-step update composition (G12)
+# ---------------------------------------------------------------------------
+# The Alternation rule stores its mutually-exclusive guarded branches on
+# action["branches"]; SequentialComposition stores its ordered sub-steps on
+# action["sequential_steps"]. Both rules ALSO keep a flat action["updates"]
+# list, but that flat list collapses multiple assignments to the SAME variable
+# down to one (first-wins) — so emitting clocked logic from "updates" alone
+# silently drops every branch/step after the first for any shared variable
+# (G12). The helpers below reconstruct the correct composed next-state RHS for
+# each variable from the structured branches/steps, so the bridge emits the
+# full logic. They are pure functions of the action dict.
+
+
+def _substitute_idents(expr: str, subst: dict[str, str]) -> str:
+    """Replace whole-identifier occurrences in *expr* per the *subst* map.
+
+    Each key in *subst* is an (unprimed) identifier; the value is the text to
+    splice in (already parenthesised by the caller when needed). Matching is
+    identifier-boundary aware via the same regex used for free-input scanning,
+    and a primed suffix is honoured (``v'`` matches the key ``v``). Identifiers
+    not present in *subst* are left untouched. Pure and deterministic.
+    """
+    if not expr or not subst:
+        return expr
+
+    def _repl(m: "re.Match[str]") -> str:
+        tok = m.group(0)
+        name = tok[:-1] if tok.endswith("'") else tok
+        return subst.get(name, tok)
+
+    return _IDENT_RE.sub(_repl, expr)
+
+
+def _nested_if(clauses: list[tuple[str, str]], default: str) -> str:
+    """Build a nested TLA+ conditional from priority-ordered (guard, expr) pairs.
+
+    Produces ``IF g1 THEN e1 ELSE IF g2 THEN e2 ELSE ... ELSE default``.
+    With no clauses, returns *default* verbatim. The trailing ELSE is the
+    register-hold value (the variable's prior value) so an un-guarded cycle
+    leaves the register unchanged — exactly RTL flip-flop semantics.
+
+    Compiler 2's translate_expr renders this recursively into a nested ternary
+    ``(g1) ? (e1) : ((g2) ? (e2) : (default))`` (see compiler2._split_if_then_else).
+    Keyword spacing (`` IF ``/`` THEN ``/`` ELSE ``) is exactly what its
+    depth-0 splitter expects.
+    """
+    if not clauses:
+        return default
+    out = default
+    for guard, value in reversed(clauses):
+        out = f"IF {guard} THEN {value} ELSE {out}"
+    return out
+
+
+def _ordered_assigned_vars(groups: list[list[dict]]) -> list[str]:
+    """First-seen-ordered list of variables assigned across *groups* of updates."""
+    order: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for upd in group:
+            v = upd.get("variable")
+            if v is not None and v not in seen:
+                seen.add(v)
+                order.append(v)
+    return order
+
+
+def _alternation_exprs(action: dict) -> list[tuple[str, str]]:
+    """Composed (variable, rhs) pairs for an Alternation action's branches.
+
+    Branches are mutually exclusive and priority-ordered. For each variable
+    assigned in any branch we emit a nested conditional that selects the
+    branch's expression under that branch's guard, in order, falling through to
+    the variable holding its previous value (trailing ``ELSE <var>``). A branch
+    that does not assign the variable is simply absent from that variable's
+    conditional chain (it holds). Deterministic.
+    """
+    branches: list[dict] = action.get("branches") or []
+    var_order = _ordered_assigned_vars([b.get("updates", []) for b in branches])
+
+    result: list[tuple[str, str]] = []
+    for var in var_order:
+        clauses: list[tuple[str, str]] = []
+        for branch in branches:
+            guard = branch.get("guard", "TRUE") or "TRUE"
+            for upd in branch.get("updates", []):
+                if upd.get("variable") == var:
+                    clauses.append((guard, upd["expression"]))
+                    break
+        result.append((var, _nested_if(clauses, var)))
+    return result
+
+
+def _sequential_exprs(action: dict) -> list[tuple[str, str]]:
+    """Composed (variable, rhs) pairs for a SequentialComposition action.
+
+    RTL nonblocking semantics chosen and documented here:
+
+      The sub-steps execute *in order within a single clock cycle*. We collapse
+      them into one next-state expression per variable by SUBSTITUTION: each
+      step's RHS is evaluated against the running symbolic state produced by all
+      EARLIER steps in the same cycle (compute -> latch -> compare reads the
+      freshly-computed value, not the registered one). This makes the emitted
+      single-cycle next-state equal to the net effect of running the steps
+      sequentially, while the final assignment is still a single nonblocking
+      register update (`reg <= rhs`) — so there is exactly one driver per
+      variable and no intra-cycle multi-driver. A step guarded by G updates the
+      variable only when G holds, otherwise the variable keeps its running value
+      (`IF G THEN new ELSE running`).
+
+    The running state begins as identity (each variable maps to itself), so a
+    variable never written by any step is never emitted (it is left to hold via
+    its own register, same as Alternation). Deterministic.
+    """
+    steps: list[dict] = action.get("sequential_steps") or []
+    var_order = _ordered_assigned_vars([s.get("updates", []) for s in steps])
+
+    # running[v] = current symbolic next-state expression for v within the cycle.
+    # Absent key == "still holds its registered value" (identity).
+    running: dict[str, str] = {}
+
+    for step in steps:
+        guard = step.get("guard", "TRUE") or "TRUE"
+        for upd in step.get("updates", []):
+            var = upd.get("variable")
+            if var is None:
+                continue
+            # Substitute earlier-step results into this step's RHS so later
+            # steps observe the freshly-computed intra-cycle values.
+            new_expr = _substitute_idents(
+                upd["expression"],
+                {k: f"({v})" for k, v in running.items()},
+            )
+            prior = running.get(var, var)  # value if this step's guard is false
+            if guard == "TRUE":
+                running[var] = new_expr
+            else:
+                running[var] = f"IF {guard} THEN {new_expr} ELSE {prior}"
+
+    return [(var, running[var]) for var in var_order]
+
+
+def _action_update_exprs(action: dict) -> list[tuple[str, str]]:
+    """Return ordered (variable, rhs_expression) pairs for one action.
+
+    Branch-/step-aware: consumes action["branches"] (Alternation) or
+    action["sequential_steps"] (SequentialComposition) when present so that
+    multiple assignments to the same variable are composed into one correct
+    next-state RHS, instead of being collapsed first-wins by the flat
+    action["updates"] list (G12). Falls back to the flat updates otherwise.
+    Pure function of *action*.
+    """
+    if action.get("branches"):
+        return _alternation_exprs(action)
+    if action.get("sequential_steps"):
+        return _sequential_exprs(action)
+    return [
+        (upd["variable"], upd["expression"])
+        for upd in action.get("updates", [])
+    ]
+
+
 def _free_inputs(engine_spec: dict, declared: set[str]) -> list[str]:
     """Collect free input identifiers across action guards and updates.
 
@@ -109,8 +272,11 @@ def _free_inputs(engine_spec: dict, declared: set[str]) -> list[str]:
         exprs: list[str] = []
         if action.get("name") != reset_name:
             exprs.append(action.get("guard", "") or "")
-        for upd in action.get("updates", []):
-            exprs.append(upd.get("expression", "") or "")
+        # Use the branch-/step-composed RHS so identifiers that appear only
+        # inside an Alternation branch or a SequentialComposition step (and not
+        # in the flat updates list) are still detected as free inputs (G12).
+        for _var, expr in _action_update_exprs(action):
+            exprs.append(expr or "")
         for expr in exprs:
             for ident in _scan_identifiers(expr):
                 if ident in declared or ident in _RESERVED_IDENTIFIERS:
@@ -256,8 +422,8 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
     if comb_actions:
         lines.append("CombinationalLogic ==")
         for action in comb_actions:
-            for update in action.get("updates", []):
-                lines.append(f"    /\\ {update['variable']}' = {update['expression']}")
+            for var, expr in _action_update_exprs(action):
+                lines.append(f"    /\\ {var}' = {expr}")
         lines.append("")
 
     # UpdatePipeline — clocked actions wrapped in IF reset THEN ... ELSE ...
@@ -266,17 +432,17 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
 
     if reset_action:
         lines.append("    /\\ IF reset = 1 THEN")
-        for update in reset_action.get("updates", []):
-            lines.append(f"          /\\ {update['variable']}' = {update['expression']}")
+        for var, expr in _action_update_exprs(reset_action):
+            lines.append(f"          /\\ {var}' = {expr}")
         lines.append("       ELSE")
         for action in clocked_actions:
-            for update in action.get("updates", []):
-                lines.append(f"          /\\ {update['variable']}' = {update['expression']}")
+            for var, expr in _action_update_exprs(action):
+                lines.append(f"          /\\ {var}' = {expr}")
     else:
         # No reset action yet — emit clocked updates flat (partial refinement)
         for action in clocked_actions:
-            for update in action.get("updates", []):
-                lines.append(f"    /\\ {update['variable']}' = {update['expression']}")
+            for var, expr in _action_update_exprs(action):
+                lines.append(f"    /\\ {var}' = {expr}")
 
     lines.append("")
 
@@ -335,14 +501,17 @@ def engine_spec_to_abstract_tla(engine_spec: dict, module_name: str) -> tuple[st
         action_names.append(aname)
 
         guard = action.get("guard", "TRUE") or "TRUE"
-        updates = action.get("updates", [])
-        updated_vars = {u["variable"] for u in updates}
+        # Branch-/step-aware composition (G12): a multi-branch / multi-step
+        # action updates each shared variable with one composed expression, not
+        # the first-wins flat update — so TLC checks the real next-state too.
+        composed = _action_update_exprs(action)
+        updated_vars = {var for var, _ in composed}
         unchanged = [v for v in var_names if v not in updated_vars]
 
         lines.append(f"{aname} ==")
         lines.append(f"    /\\ {guard}")
-        for upd in updates:
-            lines.append(f"    /\\ {upd['variable']}' = {upd['expression']}")
+        for var, expr in composed:
+            lines.append(f"    /\\ {var}' = {expr}")
         if unchanged:
             lines.append(f"    /\\ UNCHANGED <<{', '.join(unchanged)}>>")
         lines.append("")
