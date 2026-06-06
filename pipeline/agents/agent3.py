@@ -1,12 +1,13 @@
 """
 Agent 3 — Formal specification author and rule picker.
 
-One persona / system prompt / knowledge base; four entry points:
+One persona / system prompt / knowledge base; five entry points:
 
     generate_formal_spec(summary)                -> FormalSpec
     revise_on_tlc(spec, tlc_errors)             -> FormalSpec
     pick_rule(applicable_rules, spec)            -> {"rule_name": str, "params": dict}
     revise_on_cocotb(spec, sim_log)             -> FormalSpec
+    critique_refinement(abstract, concrete, ...) -> {"verdict": str, "issues": [...], "reasoning": str}
 
 SDK choice: Anthropic Python SDK (`anthropic` package) speaking directly to
 Anthropic's /v1/messages endpoint using ANTHROPIC_API_KEY from .env.
@@ -15,6 +16,14 @@ This is the actual runtime backing of the Claude Agent SDK pattern.
 NOTE: `pick_rule` is a ONE-SHOT structured-output call with NO tools and NO
 internal loop. Giving it tools would break the bounded-action-space invariant.
 See docs/handoff_runtime_agents.md §5.
+
+NOTE: `critique_refinement` is ALSO a one-shot structured-output call with NO
+tools — it is a pure read-only refinement-correctness critic that returns an
+accept/reject verdict. It is the runtime backing of pass6_checker: pass6 cannot
+work as an engine pass (it has no rule to "pick"), so it runs here as its own
+gating critic call. The no-tool design here is about keeping the critic a simple,
+mockable verdict function; the bounded-action-space invariant proper is still
+about `pick_rule` only.
 
 Key detection: if ANTHROPIC_API_KEY is the placeholder value or is missing, a
 clear, actionable error is raised at call time so stages 1-2 can still run
@@ -37,6 +46,7 @@ except ImportError:
 from pipeline.schemas.summary_schema import SpecSummary
 from pipeline.schemas.tla_schema import FormalSpec
 from pipeline.usage import log_usage, check_budget
+from pipeline.refinement_templates import pass6_checker
 
 # ---------------------------------------------------------------------------
 # Key validation
@@ -527,3 +537,111 @@ Return a single corrected JSON object matching the FormalSpec schema. No other t
     raw = _run_with_tools(user_message, call_type="revise_on_cocotb")
     data = _extract_json(raw)
     return FormalSpec.model_validate(data)
+
+
+def critique_refinement(
+    abstract_spec: dict,
+    concrete_spec: dict,
+    *,
+    abstraction_mapping: dict | None = None,
+) -> dict:
+    """
+    Refinement-correctness critic — a pure, read-only accept/reject GATE.
+
+    This is the runtime backing of pass6_checker. It is a ONE-SHOT structured-
+    output call with NO tools and NO internal loop. The critic independently
+    checks that `concrete_spec` correctly refines `abstract_spec` and returns a
+    verdict that gates compilation in stage3: 'accept' → compile, 'reject' → halt
+    with the critic's issues surfaced in the artifact.
+
+    Args:
+        abstract_spec: The abstract engine-spec dict (pre-refinement).
+        concrete_spec: The refined engine-spec dict (post-refinement, RTL-style).
+        abstraction_mapping: Optional explicit abstraction mapping; falls back to
+            concrete_spec.get("abstraction_mapping", {}) then {}.
+
+    Returns:
+        {
+          "verdict":  "accept" | "reject",
+          "issues":   [str, ...],   # human-readable problems (empty on accept)
+          "reasoning": str          # one-paragraph justification
+        }
+
+    The verdict is normalised: any non-'accept' verdict (including the critic's
+    own 'fail'/'unknown' vocabulary, or a malformed response) is treated as
+    'reject' so the gate fails CLOSED — a bad/uncertain refinement never compiles.
+    """
+    client = _get_client()
+
+    if abstraction_mapping is None:
+        abstraction_mapping = concrete_spec.get("abstraction_mapping", {}) or {}
+
+    user_message = pass6_checker.USER_TEMPLATE.format(
+        abstract_spec_json=json.dumps(abstract_spec, indent=2),
+        concrete_spec_json=json.dumps(concrete_spec, indent=2),
+        mapping_json=json.dumps(abstraction_mapping, indent=2),
+    )
+
+    # Pre-flight budget check (same cap as the other Agent 3 call types).
+    _check_budget()
+
+    # NO tools — one-shot structured-output critic call. The pass6_checker
+    # SYSTEM prompt elicits the accept/reject verdict JSON (see that module).
+    response = _create(
+        client,
+        model=_AGENT3_MODEL,
+        max_tokens=1024,
+        temperature=0.0,
+        system=pass6_checker.SYSTEM,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    # Record token usage for this one-shot call (never raises).
+    log_usage(
+        agent="agent3",
+        model=_AGENT3_MODEL,
+        usage=getattr(response, "usage", None),
+        call_type="critique_refinement",
+    )
+
+    raw = ""
+    for block in response.content:
+        if block.type == "text":
+            raw += block.text
+    raw = raw.strip()
+
+    result = _extract_json(raw)
+    return _normalise_verdict(result)
+
+
+def _normalise_verdict(result: dict) -> dict:
+    """
+    Coerce a critic response into the canonical accept/reject verdict shape.
+
+    Fails CLOSED: only an explicit 'accept' verdict accepts; everything else
+    (the critic's 'fail'/'unknown', a missing/garbled field, or a non-dict)
+    becomes 'reject' so a bad or uncertain refinement is never compiled.
+    """
+    if not isinstance(result, dict):
+        return {
+            "verdict": "reject",
+            "issues": ["Critic returned a non-object response."],
+            "reasoning": f"Unparseable critic output: {result!r}",
+        }
+
+    raw_verdict = str(result.get("verdict", "")).strip().lower()
+    verdict = "accept" if raw_verdict == "accept" else "reject"
+
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    issues = [str(i) for i in issues]
+
+    reasoning = str(result.get("reasoning", "") or "")
+
+    # If the critic used its native 'fail'/'unknown' vocabulary or any other
+    # non-accept verdict, record that as an issue so the gate's error is honest.
+    if verdict == "reject" and raw_verdict not in ("reject", ""):
+        issues = issues + [f"Critic verdict was '{raw_verdict}' (treated as reject)."]
+
+    return {"verdict": verdict, "issues": issues, "reasoning": reasoning}
