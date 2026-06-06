@@ -503,6 +503,52 @@ def session_cost(session_id: Optional[str] = None, path: Optional[Path] = None) 
     return float(sessions(path).get(sid, {}).get("estimated_cost_usd", 0.0))
 
 
+# ---------------------------------------------------------------------------
+# Budget guard — pre-flight spend cap (foundation: the Agent 3 $100 budget)
+# ---------------------------------------------------------------------------
+
+class BudgetExceeded(RuntimeError):
+    """Raised when an agent's cumulative ledger spend would exceed its budget."""
+
+
+def agent_cost(agent: str, path: Optional[Path] = None) -> float:
+    """Cumulative estimated USD logged for one agent across the whole ledger."""
+    total = 0.0
+    try:
+        for rec in _iter_records(path or _log_path()):
+            if rec.get("agent") == agent:
+                c = rec.get("cost_usd")
+                if c is not None:
+                    total += float(c)
+    except Exception:
+        pass
+    return round(total, 6)
+
+
+def check_budget(
+    agent: str,
+    budget_usd: float,
+    reserve_usd: float = 0.0,
+    path: Optional[Path] = None,
+) -> float:
+    """Pre-flight budget check. Raise BudgetExceeded if the next call could exceed.
+
+    Sums the agent's cumulative cost from the ledger and compares
+    ``spent + reserve_usd`` against ``budget_usd``. The reserve is a conservative
+    stand-in for the not-yet-logged cost of the call about to be made, so we stop
+    slightly early rather than overshoot. Returns the current spend if within
+    budget. Unlike the logging functions, this is MEANT to raise.
+    """
+    spent = agent_cost(agent, path)
+    if spent + reserve_usd >= budget_usd:
+        raise BudgetExceeded(
+            f"Agent '{agent}' budget reached: spent ~${spent:.4f} + reserve "
+            f"${reserve_usd:.2f} >= cap ${budget_usd:.2f}. Refusing further calls. "
+            f"Top up credits or raise the cap (AGENT3_BUDGET_USD) to continue."
+        )
+    return spent
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     import pprint

@@ -35,7 +35,7 @@ except ImportError:
 
 from pipeline.schemas.summary_schema import SpecSummary
 from pipeline.schemas.tla_schema import FormalSpec
-from pipeline.usage import log_usage
+from pipeline.usage import log_usage, check_budget
 
 # ---------------------------------------------------------------------------
 # Key validation
@@ -94,6 +94,34 @@ def _get_client() -> Any:
 # this; the literal below is only a sane default if the env var is unset.
 _DEFAULT_AGENT3_MODEL = "claude-opus-4-5"
 _AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Budget guard — refuse calls before cumulative Agent 3 spend hits the cap.
+# Reads the usage ledger via pipeline.usage.check_budget. Cap + reserve are
+# read from the environment on every check so they can be tuned in .env without
+# code edits (defaults: $100 total, $0.50 pre-flight reserve for the in-flight
+# call that hasn't been logged yet). check_budget raises usage.BudgetExceeded,
+# which propagates to the stage node and becomes a status=error artifact.
+# ---------------------------------------------------------------------------
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return default
+
+
+def _check_budget() -> None:
+    """Raise usage.BudgetExceeded if Agent 3 is at/over its USD budget."""
+    check_budget(
+        "agent3",
+        _env_float("AGENT3_BUDGET_USD", 100.0),
+        _env_float("AGENT3_BUDGET_RESERVE_USD", 0.50),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +224,7 @@ def _run_with_tools(user_message: str, call_type: str | None = None) -> str:
     messages: list[dict] = [{"role": "user", "content": user_message}]
 
     while True:
+        _check_budget()  # pre-flight: stop before exceeding the Agent 3 budget
         response = client.messages.create(
             model=_AGENT3_MODEL,
             max_tokens=4096,
@@ -341,6 +370,9 @@ Return a JSON object with exactly these fields:
 
 No other text, no markdown. Return only the JSON object.
 """
+
+    # Pre-flight budget check (same cap as the tool-using call types).
+    _check_budget()
 
     # NO tools — this is a one-shot structured-output call.
     # The `tools` argument is OMITTED entirely (not passed as []): the Anthropic
