@@ -14,7 +14,7 @@ Given a prompt like:
 
 > "A 2-bit counter that increments every clock cycle when enabled, and resets to zero."
 
-it emits a synthesizable `.v` file and verifies, automatically, that the design matches the requested behavior.
+it emits a synthesizable `.v` file and confirms, automatically, that the design matches the requested behavior.
 
 ---
 
