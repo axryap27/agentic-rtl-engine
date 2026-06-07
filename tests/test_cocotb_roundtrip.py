@@ -351,20 +351,21 @@ def test_generated_dff_behaves_q_follows_d_and_resets() -> None:
 
 
 def test_generated_counter_behaves_increments() -> None:
-    """BEHAVIORAL: on generated counter RTL, the count increments (mod 4) each cycle.
+    """BEHAVIORAL: on generated counter RTL, the count increments (mod 4) when enabled.
 
-    The expected absolute sequence is [2, 3, 0, 1]. The +2 starting offset is NOT
-    arbitrary: the bridge currently drops the `en` enable from the count expression
-    (the counter advances on every non-reset edge), and the generator's reset block
-    spends two settled edges deasserting reset before vector 0 is sampled. So by
-    vector 0 the count has already advanced twice past 0. What this test pins is the
-    load-bearing fact for G03 — the generated next-state logic *actually increments*
-    (and wraps 3->0), not merely that it lints clean. Consecutive expecteds differ
-    by exactly +1 mod 4.
+    The expected absolute sequence is [1, 2, 3, 0]. The +1 starting offset is NOT
+    arbitrary: the bridge now correctly weaves the `en` enable into the count
+    next-state (D5 — `count <= (en != 1) ? count : ...`), and the generator
+    initialises `en` to 0 before the reset pulse, so the counter HOLDS during the
+    single reset-deassert settle edge instead of advancing. Vector 0 (the first
+    edge with `en = 1`) therefore samples count == 1, and each subsequent enabled
+    edge adds 1 mod 4. What this pins for G03 is the load-bearing fact that the
+    generated next-state logic *actually increments and is gated by its enable*,
+    not merely that it lints clean. Consecutive expecteds differ by exactly +1.
     """
     _require_sim_tools()
     verilog = _generate_counter_verilog()
-    seq = [2, 3, 0, 1]
+    seq = [1, 2, 3, 0]
     # Guard: the sequence we assert really is a +1-mod-4 increment chain.
     assert all((seq[i + 1] - seq[i]) % 4 == 1 for i in range(len(seq) - 1))
     summary = SpecSummary(
