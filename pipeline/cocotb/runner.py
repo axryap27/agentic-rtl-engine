@@ -119,6 +119,15 @@ def run_testbench(testbench_path: Path, rtl_path: Path, module_name: str) -> dic
         docstring for the full schema). The ``phase`` key distinguishes build failures
         from test assertion failures so downstream consumers can route the fault.
     """
+    # Resolve to absolute paths up front. Phase 2 runs vvp with cwd set to the
+    # testbench's directory so cocotb can import the testbench module; if the
+    # caller passed RELATIVE paths (the graph does — artifacts/<run_id>/...), a
+    # relative vvp_bin would then be re-resolved against that cwd and double up
+    # (artifacts/<run_id>/artifacts/<run_id>/...), so vvp reports "Unable to open
+    # input file". Absolutising here makes the runner caller-cwd-independent.
+    testbench_path = Path(testbench_path).resolve()
+    rtl_path = Path(rtl_path).resolve()
+
     sim_build = testbench_path.parent / "sim_build"
     sim_build.mkdir(parents=True, exist_ok=True)
     vvp_bin = sim_build / f"{module_name}.vvp"
