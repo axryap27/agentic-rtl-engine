@@ -216,28 +216,16 @@ def test_distinct_invalid_picks_raise_via_empty_chain_backtrack():
     assert state["n"] == 3
 
 
-@pytest.mark.xfail(
-    reason=(
-        "ENGINE BUG: the `__invalid__` 3-strike accounting stores markers in a "
-        "set keyed on the rejection error text "
-        "(excluded_at[depth].add(('__invalid__', json.dumps({'error': error[:120]})))). "
-        "A picker that fails IDENTICALLY each time (e.g. repeatedly emitting the "
-        "same unregistered rule name — the most common LLM stall mode) produces "
-        "the same error string every call, so the set holds only ONE "
-        "`__invalid__` entry and invalid_count never reaches 3. The intended "
-        "3-strike->_backtrack path is therefore unreachable for identical "
-        "failures; the engine instead spins until the MAX_STEPS guard fires. "
-        "Fix: count invalid attempts with a per-depth counter, not a set keyed "
-        "on error text."
-    ),
-    strict=True,
-)
 def test_identical_invalid_picks_should_backtrack_not_spin_to_max_steps():
     """
-    A picker that returns the SAME invalid pick every time SHOULD trip the
-    3-strike backtrack at depth 0 (empty chain -> RefinementStall "chain is
-    empty") within ~3 picks. Today it instead spins to MAX_STEPS because the
-    `__invalid__` markers dedup in a set. This xfail pins the real bug.
+    A picker that returns the SAME invalid pick every time trips the 3-strike
+    backtrack at depth 0 (empty chain -> RefinementStall "chain is empty")
+    within exactly 3 picks.
+
+    D3 fix: invalid attempts are now counted with a per-depth INTEGER counter,
+    not a set keyed on the rejection error text. Previously identical failures
+    (the same error string each call) deduped to one set entry, so invalid_count
+    never reached 3 and the engine spun to MAX_STEPS instead of backtracking.
     """
     state = {"n": 0}
 
