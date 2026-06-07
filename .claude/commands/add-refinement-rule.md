@@ -25,10 +25,10 @@ Rule name (PascalCase): $ARGUMENTS
            return "<one-line description for the Rule Picker LLM prompt>"
    ```
 
-   Use the hardware meaning from `docs/architecture.md` to inform the implementation. Look at existing rule files for patterns.
+   Use the hardware meaning from `docs/refinement.md` (the six-rule table) to inform the implementation. Look at existing rule files for patterns.
 
 2. **Register the rule** in `pipeline/refinement/engine.py` (import and add to the rule registry list).
 
-3. **Add a row** to `docs/refinement_rules.md` under the appropriate table (Table 1 for process-level rules, Table 2 for control/data flow rules). Use the same symbol conventions already in the file (`⊑`, `⇒`, `∧`, `_a` subscript style).
+3. **Add a row** to `docs/background.md` under the appropriate calculus table (Table 1 for process-level rules, Table 2 for control/data flow rules), and add the implemented rule to the six-rule table in `docs/refinement.md`. Use the same conventions already in those files.
 
 4. **Report** what files were created or modified and show the full content of the new rule file.
