@@ -366,9 +366,9 @@ def test_compiler2_counter_tla_lint_clean():
     """Generate Verilog from a minimal 2-bit counter RTL TLA+ spec and lint it.
 
     Uses IF-THEN-ELSE for the counter increment to avoid modulo-width issues
-    (verilator warns on width truncation when bare 'reg' has no declared width
-    and a 32-bit integer expression is assigned to it -- a known limitation of
-    the no-bit-width emitter documented in docs/compiler1.md).
+    (verilator warns on width truncation for the `% 2^k` idiom even when the
+    [N-1:0] range is present; explicit wrap is fully clean). See
+    docs/compilers.md (Compiler 2 width handling).
     """
     counter_tla = r"""
 ---- MODULE TwoBitCounter ----
@@ -486,7 +486,7 @@ def test_bug17_width2_counter_lint_clean_no_widthtrunc():
 
     With BUG-17, the [1:0] range is now present, so a width-clean update
     expression (explicit wrap rather than `% 2^k`, which trips a verilator
-    pow2-modulo width quirk -- see docs/current_problems.md BUG-17 note)
+    pow2-modulo width quirk -- see docs/compilers.md, Compiler 2 width handling)
     produces fully WIDTHTRUNC-clean Verilog.
     """
     tick = "IF count = 3 THEN 0 ELSE count + 1"

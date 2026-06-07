@@ -2,7 +2,7 @@
 Pass-template <-> rule-registry consistency tests (G09 / G10 regressions).
 
 These tests are deterministic and OFFLINE — pure import + string introspection,
-no LLM calls. They pin the two findings from docs/test_suite_problems.md:
+no LLM calls. They pin two audit findings (see docs/refinement.md and git history):
 
   G09 — Pass templates instructed the LLM to emit UNREGISTERED rule names.
         pass2_handshake previously said `StrengthenDuring | PipingComposition`;

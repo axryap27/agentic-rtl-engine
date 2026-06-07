@@ -15,7 +15,7 @@ This is the actual runtime backing of the Claude Agent SDK pattern.
 
 NOTE: `pick_rule` is a ONE-SHOT structured-output call with NO tools and NO
 internal loop. Giving it tools would break the bounded-action-space invariant.
-See docs/handoff_runtime_agents.md §5.
+See docs/agents.md (the bounded-action-space invariant).
 
 NOTE: `critique_refinement` is ALSO a one-shot structured-output call with NO
 tools — it is a pure read-only refinement-correctness critic that returns an
@@ -429,7 +429,7 @@ def pick_rule(applicable_rules: list[dict], spec: dict, *, system_prompt: str | 
     BOUNDED-ACTION-SPACE INVARIANT: this call uses NO tools and NO internal
     loop. The model must return a structured choice in one shot.
 
-    See docs/handoff_runtime_agents.md §5.
+    See docs/agents.md (the bounded-action-space invariant).
 
     Args:
         applicable_rules: List of rule descriptor dicts, each with at least:

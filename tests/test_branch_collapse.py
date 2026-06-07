@@ -1,7 +1,7 @@
 """Direct regression for G12 — multi-branch / multi-step assignments to the
 SAME variable must NOT be collapsed first-wins.
 
-Background (docs/test_suite_problems.md, G12):
+Background (test-comprehensiveness audit finding G12; see git history):
     The Alternation rule stashes its mutually-exclusive guarded branches on
     action["branches"]; SequentialComposition stashes its ordered sub-steps on
     action["sequential_steps"]. Both ALSO keep a flat action["updates"] list

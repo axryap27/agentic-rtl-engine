@@ -4,7 +4,7 @@ The generator (`pipeline/cocotb/generator.py`) is pure Python string templating
 over `SpecSummary.test_vectors` — no LLM, no simulator. These tests are therefore
 all string-introspection on the generated `.py` text; none of them launch Icarus.
 
-Audited fragilities (docs/test_suite_problems.md, G14):
+Audited fragilities (audit finding G14; see docs/status.md):
   1. Test-vector values are interpolated *raw* via f-strings (`generator.py:71,82-84`).
      Since `inputs`/`expected` are `dict[str, Any]`, a string `'x'`, a bool, or a
      hex/4-state literal does NOT survive as the value the spec author intended:

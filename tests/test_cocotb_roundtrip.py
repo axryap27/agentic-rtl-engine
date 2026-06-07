@@ -1,7 +1,7 @@
 """Round-trip verification for the deterministic cocotb generator + runner (G03).
 
 This file was historically a `__main__` harness (`_run_tests` + `sys.exit(1)`), so
-pytest collected ZERO functions from it (docs/test_suite_problems.md, G03). It is now
+pytest collected ZERO functions from it (audit finding G03; see git history). It is now
 real, pytest-collectable `test_*` functions, each guarded by `importorskip` /
 `shutil.which` so they SKIP (not ERROR) when cocotb / iverilog / vvp are absent.
 

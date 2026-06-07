@@ -1,8 +1,8 @@
 """
 LangGraph control-plane tests — deterministic, OFFLINE (no live LLM).
 
-Covers the gaps G06 (routing + write-before-return) and G07 ('partial' RTL
-routing) from docs/test_suite_problems.md.
+Covers the audit gaps G06 (routing + write-before-return) and G07 ('partial' RTL
+routing). See docs/architecture.md (control plane) and git history.
 
 The pipeline routes SOLELY on the ``status`` field of each artifact JSON on
 disk (CLAUDE.md): conditional edge functions never look at Python return values

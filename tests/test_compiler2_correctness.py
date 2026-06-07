@@ -1,6 +1,6 @@
 """
-Compiler-2 correctness tests (deterministic, offline) for the fixes tracked in
-docs/test_suite_problems.md:
+Compiler-2 correctness tests (deterministic, offline) for the audit fixes
+(test-comprehensiveness audit; see git history):
 
   G04 — banlist must catch leaked TLA+ keywords (uppercase IF/THEN/ELSE/IN/LET/
         CASE) and a bare FORMAL_ONLY operand, WITHOUT false-positiving on
