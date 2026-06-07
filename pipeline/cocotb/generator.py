@@ -22,8 +22,34 @@ from cocotb.triggers import RisingEdge, Timer
 @cocotb.test()
 async def test_{module_name}(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    await RisingEdge(dut.clk)
+{input_init}    await RisingEdge(dut.clk)
 {reset_block}{test_vectors}"""
+
+
+def _input_init_block(summary: SpecSummary) -> str:
+    """Drive every test-vector input to 0 at t=0, before the reset pulse.
+
+    Leaving inputs undriven (X) until the first vector lets X propagate into any
+    register whose next-state depends on an input at the reset-deassert edge —
+    e.g. an enable-gated counter latches X and never recovers, even though the
+    enable is correctly driven for every subsequent vector. Initialising inputs
+    to a known 0 is standard testbench hygiene and makes such DUTs deterministic
+    (memoryless outputs like a DFF or an ALU result are unaffected, since they
+    are overwritten from the driven inputs each cycle).
+
+    Input names are derived from the test vectors (always present) rather than
+    summary.ports (often empty). clk and the reset port are excluded: the clock
+    is free-running and reset is driven by the reset block.
+    """
+    names: set[str] = set()
+    for tv in summary.test_vectors:
+        names.update(tv.inputs.keys())
+    names.discard("clk")
+    if summary.reset_port:
+        names.discard(summary.reset_port)
+    if not names:
+        return ""
+    return "".join(f"    dut.{n}.value = 0\n" for n in sorted(names))
 
 
 def _reset_block(summary: SpecSummary) -> str:
@@ -94,6 +120,7 @@ def generate_testbench(summary: SpecSummary, output_path: Path) -> Path:
     """
     content = _TEMPLATE.format(
         module_name=summary.module_name,
+        input_init=_input_init_block(summary),
         reset_block=_reset_block(summary),
         test_vectors=_test_vectors_block(summary),
     )
