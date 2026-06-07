@@ -63,8 +63,8 @@ def _fsm_datapath_engine_spec() -> dict:
     accumulator that wraps at 255. The `Accumulate` action is guarded by the
     free input `en` (an external enable, not a declared variable, not clk/reset).
     Both data and state self-update from their own prior value plus constants, so
-    no narrow signal feeds a wide register (which would be a width mismatch — see
-    test_xfail_narrow_free_input_feeds_wide_register).
+    no narrow signal feeds a wide register (the width-inference path for that is
+    covered by test_narrow_free_input_feeds_wide_register).
     """
     return {
         "variables": [
@@ -331,21 +331,15 @@ def test_multivar_compile_deterministic() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Discovered bug (xfail): a narrow free input feeding a WIDE register.
+# D2 (fixed): a free input feeding a WIDE register inherits the register's width.
 # ---------------------------------------------------------------------------
-# The reverse bridge declares every free input at width 1 (it cannot infer a
-# multi-bit width from a bare identifier reference — documented BUG-18 behavior).
-# When such a 1-bit free input is assigned directly into a multi-bit register
-# (e.g. `data <= din` where data is 8 bits), Compiler 2 faithfully emits the
-# assignment, but verilator flags WIDTHEXPAND (RHS 1 bit, LHS 8 bits) and the
-# lint FAILS. There is no width-inference path that would size `din` to match the
-# register it drives, so a real FSM+datapath that loads an external multi-bit
-# bus through a free input cannot be produced lint-clean by the bridge today.
-#
-# This is the multi-var width-correctness defect G11 anticipated. Marked xfail
-# (not patched — Wave 2 does not modify pipeline/). If the bridge learns to size
-# a free input from the register it feeds, this test will XPASS and should be
-# promoted to a positive assertion.
+# Previously the reverse bridge declared every free input at width 1, so a free
+# input assigned directly into a multi-bit register (e.g. `data <= din` where
+# data is 8 bits) tripped verilator WIDTHEXPAND (RHS 1 bit, LHS 8 bits) and lint
+# FAILED. D2 fix: engine_spec_to_rtl_tla now infers a free input's width from the
+# register it feeds directly (_infer_free_input_width), so `din` is sized to 8
+# bits and the FSM+datapath that loads an external bus lints clean. This pins the
+# multi-var width-correctness fix G11 anticipated.
 
 def _narrow_input_to_wide_reg_engine_spec() -> dict:
     """Same FSM+datapath, but `data` loads the 1-bit free input `din` directly."""
@@ -377,17 +371,12 @@ def _narrow_input_to_wide_reg_engine_spec() -> dict:
     }
 
 
-@pytest.mark.xfail(
-    reason="G11 discovery: reverse bridge declares free inputs at width 1, so a "
-           "narrow free input driving a wide register (data<=din) trips verilator "
-           "WIDTHEXPAND and fails lint. No width-inference path exists; not patched "
-           "(Wave 2 does not modify pipeline/).",
-    strict=False,
-)
-def test_xfail_narrow_free_input_feeds_wide_register() -> None:
-    """A 1-bit free input loaded into an 8-bit register must lint clean.
+def test_narrow_free_input_feeds_wide_register() -> None:
+    """A free input loaded into an 8-bit register lints clean (D2 width inference).
 
-    It does not today: WIDTHEXPAND. xfail documents the real defect.
+    D2 fix: the bridge sizes `din` to the width of the register it feeds (`data`,
+    8-bit), so verilator no longer flags WIDTHEXPAND. Previously every free input
+    was width 1 and this expanded.
     """
     if not _have_linter():
         pytest.skip("neither verilator nor iverilog installed")
