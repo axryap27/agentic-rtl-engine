@@ -269,6 +269,12 @@ def test_counter_enable_declared_as_input() -> None:
         "BUG-18 regression: guard-only free input `en` not declared as a port "
         f"(enable silently dropped). Verilog:\n{verilog}"
     )
+    # D5: the enable must also be WOVEN INTO the next-state, not merely declared.
+    # The Tick guard `en = 1` gates the increment: when not enabled, count holds.
+    assert re.search(r"count\s*<=\s*\(en\s*!=\s*1\)\s*\?\s*\(?count", verilog), (
+        "D5 regression: `en` is declared but the count next-state does not gate "
+        f"on it (counter advances unconditionally). Verilog:\n{verilog}"
+    )
 
 
 def test_compiler2_undeclared_input_declared_when_bridge_bypassed() -> None:
