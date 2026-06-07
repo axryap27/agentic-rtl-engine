@@ -21,7 +21,7 @@ _Last updated: 2026-06-07._
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **204 passed, 6 xfailed** |
+| Deterministic test suite | **246 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
 cocotb PASS offline** on two medium designs — a traffic-light FSM and a multi-op ALU —
@@ -32,29 +32,23 @@ cocotb runner.
 
 ## Open issues
 
-The six remaining `xfail`s are all **cocotb-generator fragilities (G14)** — known,
-captured, not yet fixed. The generator interpolates test-vector values raw, so it
-mishandles non-integer values and a few edge shapes:
-
-- string values (`'x'`, `'1z'`, `'0xff'`) are emitted unquoted → `NameError` /
-  `SyntaxError` / silent int coercion at sim time;
-- boolean values are not normalized to `1`/`0`;
-- the clock port is hardcoded to `dut.clk` (a summary whose clock is named otherwise is
-  never clocked);
-- empty `test_vectors` produces a vacuous PASS rather than a refusal.
-
-*Fix direction:* `repr()`/quote non-int values; derive the clock-port name from the
-`SpecSummary`; refuse (or fail) on empty vectors.
+The cocotb-generator fragilities (G14) that were the suite's only remaining `xfail`s are
+**fixed** — the deterministic suite is fully green. Values are quoted/normalized via the
+generator's `_fmt_value` (strings through `json.dumps`, bools → `1`/`0`), the clock port
+is derived from the `SpecSummary` (defaulting to `clk`), and an empty `test_vectors`
+emits a failing assert instead of a vacuous pass. The remaining open items below are
+deferred test coverage and the first live run — neither is a code defect.
 
 ### Deferred test coverage
 
-- **Usage-ledger tests** — budget boundary, never-raise contract, token extraction,
-  model→rate table.
-- **Deterministic diagnoser tests** — the `phase=="build" → "spec"` short-circuit and
-  the always-write / always-set-`last_diagnosis` contract.
 - **Live refinement convergence** — driving the engine to RTL-style with the *real*
   `pick_rule` (a gated `agentic_tests/` test), distinct from the deterministic stub
   path already covered.
+
+  The deterministic usage-ledger and diagnoser coverage previously listed here is done
+  — see `tests/test_usage_ledger.py` (budget boundary, never-raise, token extraction,
+  model→rate table) and `tests/test_diagnoser_deterministic.py` (the `phase=="build" →
+  "spec"` short-circuit and the always-write / always-set-`last_diagnosis` contract).
 
 ### Deferred polish & future scope
 

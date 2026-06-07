@@ -19,9 +19,12 @@ Audited fragilities (audit finding G14; see docs/status.md):
   3. EMPTY `test_vectors` yields a `@cocotb.test()` body with no drives and no asserts:
      a *vacuously passing* testbench that verifies nothing.
 
-Per the WAVE-2 mandate these are KNOWN fragilities — we capture them as `xfail`
-(with precise reasons) rather than patch `generator.py`. Behaviors the generator
-gets *right* (active-low vs active-high reset polarity ordering) are asserted as
+These fragilities were fixed in `generator.py` (FIX WAVE bucket 1): values are
+formatted via `_fmt_value` (strings quoted with `json.dumps`, bools normalized to
+1/0, ints bare), the clock port is derived from `summary.ports` via `_clock_port`,
+and an empty `test_vectors` list emits a failing assert instead of a vacuous pass.
+The tests below assert that fixed behavior. Behaviors the generator already got
+*right* (active-low vs active-high reset polarity ordering) are asserted as
 ordinary passing tests so we notice if they ever regress.
 
 Run with:
@@ -34,8 +37,6 @@ import ast
 import pathlib
 import sys
 import tempfile
-
-import pytest
 
 # Ensure the project root is on sys.path when run directly / under pytest.
 _ROOT = pathlib.Path(__file__).parent.parent
@@ -118,15 +119,6 @@ def test_int_valued_vectors_parse_and_assert() -> None:
 # Fragility 1a — string value 'x' (cocotb don't-care) becomes a bare NameError.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: a string test-vector value 'x' is interpolated raw "
-        "(generator.py:71) as `dut.a.value = x` — a bare Python name, not the "
-        "string \"x\". The file parses (x is a valid identifier) but raises "
-        "NameError at sim runtime. The generator must repr()/quote non-int values."
-    ),
-    strict=True,
-)
 def test_string_value_x_is_quoted_not_bare_name() -> None:
     summary = SpecSummary(
         module_name="m",
@@ -147,14 +139,6 @@ def test_string_value_x_is_quoted_not_bare_name() -> None:
 # so the generated testbench is not even collectable.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: a 4-state Verilog literal string '1z' is interpolated raw as "
-        "`dut.a.value = 1z`, an invalid Python token -> SyntaxError. The "
-        "generated testbench cannot even be imported. Values must be quoted."
-    ),
-    strict=True,
-)
 def test_fourstate_string_value_keeps_testbench_parseable() -> None:
     summary = SpecSummary(
         module_name="m",
@@ -163,7 +147,7 @@ def test_fourstate_string_value_keeps_testbench_parseable() -> None:
         test_vectors=[Vector(inputs={"a": "1z"}, expected={"q": 1})],
     )
     src = _generate(summary)
-    ast.parse(src)  # raises SyntaxError today -> xfail
+    ast.parse(src)  # quoted by _fmt_value, so the testbench stays parseable
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +155,6 @@ def test_fourstate_string_value_keeps_testbench_parseable() -> None:
 # It parses, but the round-trip fidelity (a string stays a string) is broken.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: a string value '0xff' is interpolated without quotes as "
-        "`dut.a.value = 0xff`, silently coercing the author's string into the "
-        "int literal 255. A spec author who passes a string expects a string; "
-        "the type is not preserved. (Parses, so this is fidelity, not syntax.)"
-    ),
-    strict=True,
-)
 def test_hex_string_value_preserved_as_string() -> None:
     summary = SpecSummary(
         module_name="m",
@@ -197,19 +172,10 @@ def test_hex_string_value_preserved_as_string() -> None:
 # ---------------------------------------------------------------------------
 # Fragility 1d — a bool value. This one *parses* and even drives a cocotb-legal
 # value, but the type silently diverges from an int and the failure-message text
-# reads `expected q=False` instead of `q=0`. We assert the (correct) int-like
-# behavior we WANT, and xfail because the generator emits the raw bool instead.
+# would read `expected q=False` instead of `q=0`. _fmt_value now normalizes the
+# bool to 1/0 in both the drive and the message, which this test pins.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: a bool value True/False is interpolated raw as `dut.a.value = True` "
-        "and `== False` in the assert. It parses, but the generator never "
-        "normalizes bools to 1/0, so the driven value and the failure-message "
-        "text diverge from the int form a hardware spec implies."
-    ),
-    strict=True,
-)
 def test_bool_value_normalized_to_int() -> None:
     summary = SpecSummary(
         module_name="m",
@@ -233,15 +199,6 @@ def test_bool_value_normalized_to_int() -> None:
 # never consults summary.ports, so a design clocked on `clock` is never driven.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: clock is hardcoded to dut.clk / RisingEdge(dut.clk) "
-        "(generator.py:24-25,74). A SpecSummary whose clock port is named "
-        "'clock' is never clocked — the generator ignores summary.ports. It "
-        "must derive the clock-port name from the spec, not assume 'clk'."
-    ),
-    strict=True,
-)
 def test_non_clk_clock_port_is_used() -> None:
     summary = SpecSummary(
         module_name="m",
@@ -267,16 +224,6 @@ def test_non_clk_clock_port_is_used() -> None:
 # Fragility 3 — empty test_vectors must NOT yield a vacuously-passing testbench.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "G14: with empty summary.test_vectors the generator emits a "
-        "@cocotb.test() body containing only the clock + initial edge — no "
-        "drives, no asserts. Such a testbench PASSES while verifying nothing "
-        "(vacuous pass). The generator should refuse to emit (or emit a "
-        "failing/skipped) testbench when there are no vectors."
-    ),
-    strict=True,
-)
 def test_empty_vectors_does_not_produce_vacuous_pass() -> None:
     summary = SpecSummary(
         module_name="m",
