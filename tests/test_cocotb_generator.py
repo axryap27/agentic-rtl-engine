@@ -105,7 +105,10 @@ def test_int_valued_vectors_parse_and_assert() -> None:
     )
     src = _generate(summary)
     ast.parse(src)  # must be syntactically valid Python
-    assert _drive_lines(src, "en") == ["    dut.en.value = 1"]
+    # The generator initialises every input to 0 before the reset pulse (TB
+    # hygiene, so undriven X cannot poison a registered DUT), then drives the
+    # vector value. So `en` is driven 0 (init) then 1 (vector 0), in that order.
+    assert _drive_lines(src, "en") == ["    dut.en.value = 0", "    dut.en.value = 1"]
     assert _assert_lines(src, "q"), "expected output `q` was not asserted"
     # The control case must NOT introduce a stray free name (the bug signature below).
     assert "x" not in _runtime_names(src)
