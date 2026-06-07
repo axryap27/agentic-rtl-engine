@@ -33,20 +33,22 @@ WHAT IT ASSERTS
     pipeline forgets to emit, the real cocotb runner PASSes the fixture's
     reset-offset test vectors (guarded by iverilog + cocotb-config presence).
 
-DISCOVERIES (xfail'd, NOT patched — Wave 2 must not touch pipeline/)
---------------------------------------------------------------------
-Two real medium-tier pipeline bugs surfaced and are captured as xfail tests:
+DISCOVERIES (Wave 2) — NOW FIXED in Wave 3 (the tests below are positive)
+------------------------------------------------------------------------
+Two real medium-tier pipeline bugs surfaced in Wave 2 and were fixed in Wave 3:
 
-  D1  Compiler 2 emits no `timescale directive, so the graph's own Stage 4
-      cocotb run cannot keep cocotb's 10 ns clock and ALWAYS errors
-      ("Bad period: Unable to accurately represent 10(ns) with precision 1e0").
-      -> test_graph_stage4_cocotb_passes_xfail
+  D1  Compiler 2 emitted no `timescale directive, so the graph's Stage 4 cocotb
+      run could not represent cocotb's 10 ns clock. FIXED: Compiler 2 emits
+      `timescale 1ns/1ps. (A companion runner fix absolutises run_testbench's
+      paths so the graph's relative artifact paths no longer break the build.)
+      -> test_graph_stage4_cocotb_passes
 
-  D2  Compiler 2 sizes every FREE INPUT as 1 bit, so the ALU's 2-bit `op`
-      truncates and the wrong operation is selected: lint-clean but wrong RTL.
-      -> test_alu_freeinput_width_truncation_xfail
+  D2  Compiler 2 sized every FREE INPUT as 1 bit, so the ALU's 2-bit `op`
+      truncated and the wrong op was selected. FIXED: the bridge sizes free
+      inputs from the SpecSummary port width / the register they feed.
+      -> test_alu_freeinput_width_correct
 
-A third limitation is documented (not xfail'd, since the fixtures avoid it):
+A further limitation is documented (not relevant to the fixtures, which avoid it):
 Compiler 2's IF-THEN-ELSE splitter does not recurse into the THEN branch, so a
 conditional nested inside a THEN leaks untranslated IF/THEN/ELSE keywords. The
 fixtures express multi-way logic as flat ELSE-IF chains to stay clear of it.
@@ -233,24 +235,14 @@ def test_end_to_end_offline_traffic_light_lints_clean(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
-@pytest.mark.xfail(
-    reason=(
-        "D1: the graph's own Stage-4 cocotb path cannot simulate Compiler-2 "
-        "output. Even with a timescale injected, the iverilog build produces no "
-        ".vvp and cocotb's VPI fails to initialize. Same missing-`timescale / "
-        "generated-RTL-sim root cause as test_graph_stage4_cocotb_passes_xfail. "
-        "Fix belongs in pipeline/compilers/compiler2.py (emit `timescale) or the "
-        "cocotb runner; Wave 2 does not patch pipeline/."
-    ),
-    strict=False,
-)
 def test_end_to_end_offline_traffic_light_cocotb(tmp_path, monkeypatch):
     """Functional verification: the graph's traffic-light RTL PASSes cocotb.
 
     Runs the REAL cocotb runner (the same one Stage 4 uses) on the pipeline's
-    output.v and the Stage-2-generated testbench. We prepend the `timescale
-    directive Compiler 2 omits (D1) so the simulator can represent the clock;
-    everything else — the RTL logic, the test vectors, the runner — is the
+    output.v and the Stage-2-generated testbench. D1 fix: Compiler 2 now emits
+    `timescale 1ns/1ps so the simulator represents the 10 ns clock; the
+    inject_timescale flag is now redundant (a second directive is harmless).
+    Everything else — the RTL logic, the test vectors, the runner — is the
     pipeline's own output. A PASS here proves the medium FSM's next-state and
     timer datapath are functionally correct, not merely lint-clean.
     """
@@ -319,22 +311,14 @@ def test_end_to_end_offline_alu_lints_clean(tmp_path, monkeypatch):
 # ===========================================================================
 
 @pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
-@pytest.mark.xfail(
-    reason=(
-        "D1: Compiler 2 emits no `timescale directive, so the graph's own Stage 4 "
-        "cocotb run cannot represent cocotb's 10 ns clock and always errors "
-        "('Bad period: Unable to accurately represent 10(ns) with precision 1e0'). "
-        "The pipeline's end-to-end cocotb PASS is therefore impossible today. "
-        "Fix belongs in pipeline/compilers/compiler2.py (emit `timescale) or the "
-        "runner; Wave 2 does not patch pipeline/."
-    ),
-    strict=True,
-)
-def test_graph_stage4_cocotb_passes_xfail(tmp_path, monkeypatch):
-    """The graph's OWN Stage 4 (04_evaluation.json) should reach cocotb PASS.
+def test_graph_stage4_cocotb_passes(tmp_path, monkeypatch):
+    """The graph's OWN Stage 4 (04_evaluation.json) reaches cocotb PASS.
 
     This is the literal G01 acceptance criterion ('Stage 4 runs to a cocotb
-    PASS'). It xfails on the missing-`timescale bug: 04_evaluation ends 'error'.
+    PASS') — the full NL→RTL→cocotb-verified headline goal on a medium FSM.
+    Unblocked by D1 (Compiler 2 emits `timescale) plus the runner path fix
+    (run_testbench now absolutises its inputs, so the graph's relative
+    artifact paths no longer double up and the .vvp builds).
     """
     artifact_dir = _seed_and_invoke(
         tmp_path, monkeypatch, "traffic_light",
@@ -347,21 +331,12 @@ def test_graph_stage4_cocotb_passes_xfail(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
-@pytest.mark.xfail(
-    reason=(
-        "D2: Compiler 2 sizes every free input as 1 bit (BUG-18 residual / G11), "
-        "so the ALU's 2-bit `op` truncates to 1 bit and ops 2/3 (AND/OR) are never "
-        "selected. The RTL is lint-clean but functionally wrong: cocotb fails the "
-        "op>=2 vectors. Even with `timescale injected this cannot pass. Fix belongs "
-        "in pipeline/refinement/bridge.py free-input width inference; not patched here."
-    ),
-    strict=True,
-)
-def test_alu_freeinput_width_truncation_xfail(tmp_path, monkeypatch):
-    """The ALU RTL should compute all four ops correctly under cocotb.
+def test_alu_freeinput_width_correct(tmp_path, monkeypatch):
+    """The ALU RTL computes all four ops correctly under cocotb.
 
-    Xfails: `op` truncated to 1 bit selects only ADD/SUB, so AND/OR vectors fail
-    even with the `timescale workaround applied.
+    D2 fix: the bridge sizes the 2-bit `op` free input from the Stage-1
+    SpecSummary port width (instead of truncating it to 1 bit), so ops 2/3
+    (AND/OR) are selected correctly and every cocotb vector passes.
     """
     artifact_dir = _seed_and_invoke(
         tmp_path, monkeypatch, "alu",
