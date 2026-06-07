@@ -15,11 +15,11 @@
 
 ---
 
-## 1.5 Resolution Status — Wave 1 (fixes) + Wave 2 (tests) · updated 2026-06-06
+## 1.5 Resolution Status — Wave 1 (fixes) + Wave 2 (tests) + Wave 3 (D-series fixes) · updated 2026-06-07
 
-**Wave 1 (production fixes, committed in `564cf8a` / `7e59f79`):** all six confirmed bugs are fixed and proven by integration (a 3-branch FSM now emits a correct nested ternary, lints clean, and is rejected if multi-driven). **Wave 2 (deterministic test suite):** ~140 tests added across 9 files. **Suite now: 198 passed, 12 xfailed, 0 failed** (baseline was 58 passed). The 12 xfails are *newly discovered* bugs (D1–D5 below), deliberately captured but **not patched** (test-only wave).
+**Wave 1 (production fixes, committed in `564cf8a` / `7e59f79`):** all six confirmed bugs are fixed and proven by integration (a 3-branch FSM now emits a correct nested ternary, lints clean, and is rejected if multi-driven). **Wave 2 (deterministic test suite):** ~140 tests added across 9 files; surfaced D1–D5 as xfail. **Wave 3 (D-series fixes, 2026-06-07):** D1–D5 fixed plus two companion fixes the medium fixtures revealed (cocotb runner path resolution + generator input initialisation). **Suite now: 204 passed, 6 xfailed, 0 failed** (Wave 2 was 198 passed / 12 xfailed). The 6 remaining xfails are all G14 cocotb-generator value/clock fragilities (still deferred).
 
-> **Revised bottom line:** the original blockers (G04/G05/G09/G10/G12/G13) are gone, but Wave 2's first real medium-tier fixtures surfaced **two new blockers** — **D1** (no `` `timescale `` → generated RTL can't be simulated end-to-end) and **D2** (free inputs forced to 1 bit → multi-bit buses truncate). The pipeline can now *emit* correct multi-branch RTL, but **still cannot be verified end-to-end on a medium design** until D1/D2 are fixed.
+> **Wave 3 bottom line — the headline goal is met end-to-end.** The full LangGraph now runs NL → RTL → **cocotb PASS** on two medium designs offline: a traffic-light FSM (`test_graph_stage4_cocotb_passes`) and a multi-op ALU (`test_alu_freeinput_width_correct`), both asserting the graph's own `04_evaluation.json == "success"` / a real cocotb PASS. D1 (timescale) alone was insufficient — the cocotb **runner** passed a relative `.vvp` path while running vvp with a changed cwd, so the graph's relative artifact paths doubled up and the build silently produced no binary; absolutising the runner's inputs unblocked it. D2's free-input width inference makes the ALU's 2-bit `op` select all four ops correctly. D5's enable gating exposed a generator gap (inputs left X during the reset preamble poison a self-feeding register), fixed by initialising inputs to 0.
 
 ### Bug fixes (Wave 1) — ✅ DONE
 
@@ -49,19 +49,23 @@
 | `tests/test_end_to_end_offline.py` | 4 (+3 xfail) | **G01, G02** — medium fixtures (traffic-light FSM, ALU) + full-graph offline |
 | `tests/test_refinement_convergence.py` | _modified_ | `_step_index` module-global removed → applicability-driven picker |
 
-### New discoveries (Wave 2) — ⚠️ OPEN bugs (captured as xfail, NOT patched)
+### New discoveries (Wave 2) — ✅ FIXED in Wave 3 (2026-06-07)
 
-- **D1 — Compiler 2 emits no `` `timescale `` directive.** iverilog defaults to 1 s precision, so the cocotb generator's `Clock(dut.clk, 10, unit="ns")` is rejected → **no Compiler-2-generated module can be simulated end-to-end.** Blocks G01/G03 functional verification through the real pipeline. *Fix: emit `` `timescale 1ns/1ps `` in compiler2 (or a sim-safe period in the runner).* xfail in `test_branch_collapse`, `test_end_to_end_offline` (×2).
-- **D2 — free inputs sized at 1 bit.** `engine_spec_to_rtl_tla` can't infer a multi-bit width from a bare identifier, so any multi-bit external bus (UART rx data, FIFO write data, ALU operands) truncates / trips verilator `WIDTHEXPAND` → lint-clean-but-functionally-wrong RTL. *Fix: free-input width inference in the bridge.* xfail in `test_reverse_bridge`, `test_end_to_end_offline` (ALU).
-- **D3 — engine `__invalid__` 3-strike accounting keyed on an error-text set.** A picker that fails *identically* every call (the most common LLM stall — re-emitting the same bad rule name) yields one set entry, so `invalid_count` never reaches 3 and backtrack never fires; the engine spins to `MAX_STEPS`. *Fix: per-depth integer counter, not a set keyed on error text.* xfail in `test_refinement_backtrack`.
-- **D4 — injected `pick_rule` gets no excluded-choices argument** (flagged, not xfail). After a backtrack, a pure-of-spec picker re-picks the now-excluded choice and loops — a latent live-convergence risk.
-- **D5 — bridge drops the guard-only `en` enable from the counter** (G12-adjacent / BUG-18 lineage; noted while building the cocotb counter sim). `en` is declared as an input port but never woven into the next-state, so the counter advances unconditionally. *Worth confirming + fixing the guard→logic path.*
+| Bug | Fix | Where | Test (now positive) |
+|---|---|---|---|
+| **D1** | Compiler 2 emits `` `timescale 1ns / 1ps `` as the first line of every module, so iverilog can represent cocotb's 10 ns clock. | `compiler2.py` (`RTLTLACompiler.compile`) | `test_branch_collapse::test_compiler2_output_simulatable_without_prepended_timescale`, `test_end_to_end_offline::test_graph_stage4_cocotb_passes` |
+| **D2** | Free inputs are sized via `_free_input_width`: (1) a Stage-1 SpecSummary port-width hint (threaded through stage3), else (2) inference from a register the input feeds directly (`data' = din` → `din` inherits `data`'s width), else 1. | `bridge.py`, `stage3.py` | `test_reverse_bridge::test_narrow_free_input_feeds_wide_register`, `test_end_to_end_offline::test_alu_freeinput_width_correct` |
+| **D3** | Invalid picks counted by a per-depth **integer** counter (`invalid_counts`), not a set keyed on error text, so identical failures reach the 3-strike backtrack. | `engine.py` | `test_refinement_backtrack::test_identical_invalid_picks_should_backtrack_not_spin_to_max_steps` |
+| **D4** | Re-picking an already-excluded choice now also counts as a strike, so a pure-of-spec picker backtracks instead of looping to `MAX_STEPS`. | `engine.py` | covered by the backtrack suite (no separate xfail) |
+| **D5** | A clocked action's non-trivial guard is woven into the next-state via `_clocked_update_exprs` (`IF <not guard> THEN var ELSE <update>`, negated-guard/ELSE-chain form so Compiler 2 renders a clean nested ternary). | `bridge.py` | `test_dff::test_counter_enable_declared_as_input` (asserts the `(en != 1) ? count : ...` gating) |
+| **companion: runner** | `run_testbench` absolutises `testbench_path`/`rtl_path` before changing cwd, so the graph's relative artifact paths no longer double up and the `.vvp` builds. This (not D1 alone) is what unblocked the graph's end-to-end cocotb PASS. | `cocotb/runner.py` | `test_end_to_end_offline::test_graph_stage4_cocotb_passes` |
+| **companion: generator** | The generator initialises every test-vector input to 0 before the reset pulse, so undriven X cannot poison a self-feeding register at the reset-deassert edge (exposed by D5's enable gating). Shifts the en-gated counter's reset offset by one (`[2,3,0,1]` → `[1,2,3,0]`). | `cocotb/generator.py` | `test_cocotb_roundtrip::test_generated_counter_behaves_increments` |
 
 ### Still open / deferred
 
+- **G14** (cocotb-generator value/clock fragilities) — the 6 remaining xfails: non-int/hex/bool/`'x'` values interpolated raw, non-`clk` clock-port name, empty-`test_vectors` vacuous pass. Deferred.
 - **G15** (usage-ledger tests) and **G16** (deterministic diagnoser tests) — deferred "batch 2", not yet written.
 - **G08 live half** — refinement-to-convergence with the *real* `pick_rule` (gated live test) still unwritten.
-- **D1–D5** — the new bugs above; candidates for the next fix wave (D1 + D2 are the medium-design end-to-end blockers).
 
 > Sections 2–7 below are the **original audit** (2026-06-06), preserved as the historical record of what was found before Wave 1/2.
 
