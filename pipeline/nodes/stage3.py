@@ -250,13 +250,37 @@ def _make_pick_rule_callable(system_prompt: str | None = None):
 # Shared TLC → refinement → Compiler 2 pipeline (called by all entry points)
 # ---------------------------------------------------------------------------
 
-def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineState:
+def _input_port_widths(artifact_dir: Path) -> dict[str, int]:
+    """Best-effort {name: width} for the design's INPUT ports from 01_summary.json.
+
+    Used to size free inputs in the reverse bridge (D2): a free input declared
+    multi-bit in the Stage-1 SpecSummary (e.g. a 2-bit ALU `op`) must not be
+    truncated to 1 bit. Returns {} on any error so the bridge falls back to
+    register-feed inference / width-1, never crashing the stage.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        summary = SpecSummary.model_validate(data)
+        return {p.name: p.width for p in summary.ports if p.direction == "input"}
+    except Exception:
+        return {}
+
+
+def _run_stage3_from_spec(
+    state: PipelineState,
+    spec: FormalSpec,
+    port_widths: dict[str, int] | None = None,
+) -> PipelineState:
     """
     Run the TLC loop, refinement engine, and Compiler 2 for a given FormalSpec.
 
     Writes 02_formal_spec.json and 03_rtl_output.json before returning.
     Used by run_stage3, run_stage3_revise_cocotb, and (indirectly) as a model
     for run_stage3_backtrack_refinement.
+
+    port_widths: {name: width} hints (from the SpecSummary input ports) used to
+    size free inputs in the reverse bridge (D2). None → bridge falls back to
+    register-feed inference / width-1.
     """
     run_id = state["run_id"]
     artifact_dir = Path("artifacts") / run_id
@@ -350,7 +374,9 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
                 formal_artifact["refinement_warnings"] = refinement_warnings
                 write_artifact(formal_path, formal_artifact)
 
-            rtl_tla_source = engine_spec_to_rtl_tla(current_spec, spec.module_name)
+            rtl_tla_source = engine_spec_to_rtl_tla(
+                current_spec, spec.module_name, port_widths=port_widths
+            )
             refined_engine_spec = current_spec
             refinement_ok = True
 
@@ -471,7 +497,10 @@ def run_stage3(state: PipelineState) -> PipelineState:
         _write_error(rtl_path, msg)
         return state
 
-    return _run_stage3_from_spec(state, spec)
+    # D2: pass the declared input-port widths so multi-bit free inputs aren't
+    # truncated to 1 bit by the reverse bridge.
+    port_widths = {p.name: p.width for p in summary.ports if p.direction == "input"}
+    return _run_stage3_from_spec(state, spec, port_widths=port_widths)
 
 
 def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
@@ -530,7 +559,9 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
 
     # Hand off to the shared pipeline — BUG-2 FIX: we pass the revised spec
     # directly instead of calling run_stage3() which would re-generate from scratch.
-    return _run_stage3_from_spec(state, revised)
+    return _run_stage3_from_spec(
+        state, revised, port_widths=_input_port_widths(artifact_dir)
+    )
 
 
 def run_stage3_backtrack_refinement(state: PipelineState) -> PipelineState:
@@ -643,7 +674,10 @@ update expressions that differ from the choices that led to the failure.
             run_id=run_id,
             tlc_check=tlc_gate,
         )
-        rtl_tla_source = engine_spec_to_rtl_tla(final_spec, spec.module_name)
+        rtl_tla_source = engine_spec_to_rtl_tla(
+            final_spec, spec.module_name,
+            port_widths=_input_port_widths(artifact_dir),
+        )
     except RefinementStall as exc:
         _write_error(rtl_path, f"Backtrack refinement stalled: {exc}")
         return state
