@@ -47,8 +47,8 @@ RUN_LIVE_LLM=1 pytest agentic_tests/test_agent3_live.py -m live_llm
 Credentials are read from the process environment, or loaded from `.env` if
 present (via `python-dotenv` when installed, else a minimal built-in parser).
 
-> **Budget note:** before running the Agent 3 tests at volume, wire up the
-> Agent 3 budget guard (see `docs/current_problems.md` → *Setup still pending*).
+> **Budget note:** before running the Agent 3 tests at volume, review the
+> Agent 3 budget guard (see `docs/agents.md` → *Budget guard*).
 > Agent 3 bills against its own Anthropic account with a configured cap; these
 > tests are small but they are not free.
 
