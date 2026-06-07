@@ -787,6 +787,15 @@ class RTLTLACompiler:
 
         out: list[str] = []
 
+        # --- Timescale directive (D1) ---
+        # Synthesis tools ignore `timescale; simulators need it. Without it
+        # iverilog defaults to a 1 s time precision and rejects the cocotb
+        # generator's 10 ns clock ("Bad period: Unable to accurately represent
+        # 10(ns) with precision 1e0"), so no Compiler-2 module could be
+        # simulated end-to-end. 1ns/1ps is the conventional RTL sim resolution.
+        out.append("`timescale 1ns / 1ps")
+        out.append("")
+
         # --- Module header with full inferred port list ---
         port_decls: list[str] = (
             ["    input  clk", "    input  reset"]
