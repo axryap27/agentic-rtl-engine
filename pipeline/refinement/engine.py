@@ -325,6 +325,16 @@ def run(
     chain: list[dict] = []
     # excluded set keyed by chain depth: excluded_at[depth] = set of (rule_name, params_json)
     excluded_at: dict[int, set[tuple[str, str]]] = {}
+    # Per-depth count of FAILED pick attempts (an invalid pick_rule return, or a
+    # re-pick of an already-excluded choice). A plain INTEGER counter — NOT a set
+    # keyed on the rejection text — so that a picker which fails IDENTICALLY every
+    # call (the most common LLM stall: re-emitting the same bad rule name) still
+    # reaches the strike threshold and backtracks, instead of deduping to one
+    # entry and spinning to MAX_STEPS (D3). Re-picking an excluded choice is also
+    # counted, so a pure-function-of-spec picker that keeps returning the same
+    # now-excluded choice backtracks rather than looping (D4). Reset on a
+    # successful commit at a depth so a later revisit gets fresh strikes.
+    invalid_counts: dict[int, int] = {}
     # Current spec
     spec = copy.deepcopy(formal_spec)
 
@@ -372,16 +382,11 @@ def run(
         applicable_names = [r.__class__.__name__ for r in applicable]
         error = _validate_pick(choice, applicable_names, excluded_here)
         if error:
-            # Invalid return from pick_rule — count invalid responses at this
-            # depth; after 3, backtrack.
-            excluded_at.setdefault(depth, set()).add(
-                ("__invalid__", json.dumps({"error": error[:120]}, sort_keys=True))
-            )
-            invalid_count = sum(
-                1 for name, _ in excluded_at.get(depth, set())
-                if name == "__invalid__"
-            )
-            if invalid_count >= 3:
+            # Invalid return from pick_rule — count this strike at the current
+            # depth (integer counter, not a set keyed on error text — D3); after
+            # 3 strikes, backtrack.
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
                 spec, chain = _backtrack(
                     formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
                 )
@@ -391,9 +396,17 @@ def run(
         params: dict = choice["params"]
         params_json = json.dumps(params, sort_keys=True)
 
-        # Double-check exclusion (pick_rule may not have honoured the contract)
+        # Double-check exclusion (pick_rule may not have honoured the contract).
+        # A picker that is a pure function of the spec keeps returning the same
+        # now-excluded choice forever; count each re-pick as a strike so the
+        # 3-strike backtrack fires instead of spinning to MAX_STEPS (D4).
         if (rule_name, params_json) in excluded_here:
             excluded_at.setdefault(depth, set()).add((rule_name, params_json))
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
             continue
 
         rule = rule_by_name[rule_name]
@@ -423,6 +436,9 @@ def run(
             "post_hash": post_hash,
         }
         chain.append(step)
+        # This depth is resolved — clear its strike count so a later backtrack
+        # that revisits it gets a fresh 3-strike budget (D3/D4).
+        invalid_counts.pop(depth, None)
         # Persist the accumulated chain (prior passes + this pass), renumbered
         # to a single monotonic sequence for on-disk readability (G13).
         _save_chain(run_id, _renumber_steps(committed_prefix + chain))
