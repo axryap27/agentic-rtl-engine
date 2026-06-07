@@ -286,6 +286,125 @@ def _free_inputs(engine_spec: dict, declared: set[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Free-input width inference (D2)
+# ---------------------------------------------------------------------------
+# A free input (see _free_inputs) has no declaration of its own, so it has no
+# declared bit width. Defaulting every free input to 1 bit silently truncates
+# any multi-bit external bus (a 2-bit ALU `op`, an 8-bit data input) — lint may
+# even pass while the hardware is wrong. We resolve a free input's width from
+# two sources, in priority order:
+#   (1) An explicit Stage-1 SpecSummary port width (the design's declared truth,
+#       e.g. `op` is 2-bit). Threaded in as `port_widths` from stage3.
+#   (2) Inference from a register the input feeds directly: if `var' = din` and
+#       `var` is W bits, `din` must be W bits or Verilog flags WIDTHEXPAND.
+# Falling back to 1 only when neither applies.
+
+
+def _infer_free_input_width(name: str, engine_spec: dict) -> int | None:
+    """Width of a free input inferred from a register it feeds directly.
+
+    If the free input is the ENTIRE right-hand side of an update whose target is
+    a declared variable of width W (e.g. ``data' = din`` with ``data`` 8-bit),
+    the free input must be W bits wide or Verilog flags WIDTHEXPAND. Returns the
+    widest such W, or None if the free input never directly feeds a register.
+
+    Uses the ungated composed updates (``_action_update_exprs``); it runs before
+    any D5 guard-wrapping, so a bare-identifier RHS is still visible here.
+    """
+    var_widths = {
+        v["name"]: int(v.get("width") or 1)
+        for v in engine_spec.get("variables", [])
+    }
+    best: int | None = None
+    for action in engine_spec.get("actions", []):
+        for var, expr in _action_update_exprs(action):
+            rhs = (expr or "").strip()
+            while rhs.startswith("(") and rhs.endswith(")"):
+                rhs = rhs[1:-1].strip()
+            if rhs == name and var in var_widths:
+                w = var_widths[var]
+                if best is None or w > best:
+                    best = w
+    return best
+
+
+def _free_input_width(
+    name: str, engine_spec: dict, port_widths: dict | None,
+) -> int:
+    """Resolve a free input's bit width (priority: port hint → register feed → 1)."""
+    if port_widths:
+        w = port_widths.get(name)
+        if w:
+            return max(1, int(w))
+    inferred = _infer_free_input_width(name, engine_spec)
+    if inferred is not None:
+        return inferred
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Clocked-action guard → next-state gating (D5)
+# ---------------------------------------------------------------------------
+# A clocked action guarded by a non-trivial condition (e.g. a counter's Tick
+# guarded by `en = 1`) must only update its registers when the guard holds;
+# otherwise each register holds its prior value. The bridge previously emitted
+# the update unconditionally, silently dropping the enable (BUG-18 lineage / D5:
+# the counter counted every cycle regardless of `en`). We weave the guard in.
+
+#: Relational-operator negations used to build the D5 hold-else form.
+_REL_NEG: dict[str, str] = {
+    "/=": "=", "<=": ">", ">=": "<", "<": ">=", ">": "<=", "=": "/=",
+}
+
+
+def _negate_guard(guard: str) -> str | None:
+    """Negate a single-clause relational guard, or None if it can't be safely negated.
+
+    Returns None when the guard is trivial (``TRUE``/empty → no gating needed)
+    or is a conjunction/disjunction (De Morgan is out of scope — bail so the
+    caller emits the update ungated rather than risk a wrong negation). Handles
+    only the single relational forms the Tier-1 rules actually produce
+    (``=``, ``/=``, ``<``, ``>``, ``<=``, ``>=``). Pure.
+    """
+    g = (guard or "").strip()
+    if not g or g == "TRUE":
+        return None
+    if "/\\" in g or "\\/" in g:
+        return None
+    while g.startswith("(") and g.endswith(")"):
+        g = g[1:-1].strip()
+    # Two-char operators are listed first so they win over their one-char
+    # prefixes at the same position; `.*?` picks the first operator.
+    m = re.match(r"^(.*?)\s*(/=|<=|>=|=|<|>)\s*(.*)$", g)
+    if not m:
+        return None
+    lhs, op, rhs = m.group(1).strip(), m.group(2), m.group(3).strip()
+    if not lhs or not rhs:
+        return None
+    return f"{lhs} {_REL_NEG[op]} {rhs}"
+
+
+def _clocked_update_exprs(action: dict) -> list[tuple[str, str]]:
+    """(variable, rhs) pairs for a clocked action, with its guard woven in (D5).
+
+    Emits ``IF <not guard> THEN <var> ELSE <update>`` — the negated-guard form,
+    which keeps every THEN branch a simple leaf so Compiler 2's expression
+    translator renders a clean nested ternary. (A guard in THEN position with a
+    nested IF in it leaks untranslated IF/THEN/ELSE keywords through Compiler 2's
+    structural splitter; the negated form sidesteps that.)
+
+    When the guard is trivial or cannot be safely negated, the update is emitted
+    ungated — identical to the prior behaviour, so no regression. The reset
+    action is handled separately by the caller and never passes through here.
+    """
+    pairs = _action_update_exprs(action)
+    neg = _negate_guard(action.get("guard", "") or "")
+    if neg is None:
+        return pairs
+    return [(var, f"IF {neg} THEN {var} ELSE {expr}") for var, expr in pairs]
+
+
+# ---------------------------------------------------------------------------
 # Forward bridge: FormalSpec → engine spec
 # ---------------------------------------------------------------------------
 
@@ -344,7 +463,9 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
 # Reverse bridge: engine spec → RTL-style TLA+ text (for Compiler 2)
 # ---------------------------------------------------------------------------
 
-def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
+def engine_spec_to_rtl_tla(
+    engine_spec: dict, module_name: str, port_widths: dict | None = None,
+) -> str:
     """
     Convert a post-refinement engine spec dict to RTL-style TLA+ text.
 
@@ -355,6 +476,9 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
     Args:
         engine_spec: RTL-style engine spec (output of engine.run()).
         module_name: TLA+ module name (used in the module header).
+        port_widths: optional {name: width} hints for free inputs, sourced from
+            the Stage-1 SpecSummary ports. A free input listed here is sized to
+            the declared width instead of inferred/defaulted (D2).
 
     Returns:
         TLA+ source string ready for Compiler 2.
@@ -387,11 +511,15 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
     # undeclared wire (e.g. `d` on a DFF -> iverilog "Unable to bind wire `d'";
     # a guard-only `en` is silently dropped). Declaring them here lets Compiler
     # 2's "not driven by either block -> input port" classifier expose them as
-    # inputs. Default width 1 — we do not invent multi-bit widths from a bare
-    # identifier reference. Sorted (by _free_inputs) for deterministic output.
+    # inputs. Each free input is sized via _free_input_width (D2): a Stage-1
+    # SpecSummary port hint, else inference from a register it directly feeds,
+    # else 1. Sorted (by _free_inputs) for deterministic output.
     declared = {name for name, _ in sized_vars}
     free_inputs = _free_inputs(engine_spec, declared)
-    sized_vars += [(name, 1) for name in free_inputs]
+    sized_vars += [
+        (name, _free_input_width(name, engine_spec, port_widths))
+        for name in free_inputs
+    ]
 
     lines.append("VARIABLES")
     for i, (name, width) in enumerate(sized_vars):
@@ -436,12 +564,14 @@ def engine_spec_to_rtl_tla(engine_spec: dict, module_name: str) -> str:
             lines.append(f"          /\\ {var}' = {expr}")
         lines.append("       ELSE")
         for action in clocked_actions:
-            for var, expr in _action_update_exprs(action):
+            # _clocked_update_exprs weaves a non-trivial action guard into the
+            # next-state (D5) so e.g. `en = 1` actually gates the update.
+            for var, expr in _clocked_update_exprs(action):
                 lines.append(f"          /\\ {var}' = {expr}")
     else:
         # No reset action yet — emit clocked updates flat (partial refinement)
         for action in clocked_actions:
-            for var, expr in _action_update_exprs(action):
+            for var, expr in _clocked_update_exprs(action):
                 lines.append(f"    /\\ {var}' = {expr}")
 
     lines.append("")
