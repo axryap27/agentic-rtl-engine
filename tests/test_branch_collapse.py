@@ -512,28 +512,15 @@ def test_fsm_steps_through_all_states_functionally(tmp_path) -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DISCOVERY: Compiler 2 (compile_tla_to_verilog) emits no `timescale` "
-        "directive, so iverilog defaults to 1s precision and the cocotb "
-        "generator's Clock(dut.clk, 10, unit='ns') is rejected with "
-        "'Bad period: unable to accurately represent 10(ns) with precision 1e0'. "
-        "Every Compiler-2-generated module is therefore unsimulatable under the "
-        "stock cocotb generator without a hand-prepended timescale. Test-only "
-        "wave: not patching pipeline/. The fix belongs in compiler2 (emit "
-        "`timescale 1ns/1ps`) or the cocotb generator (use a sim-precision-"
-        "safe period)."
-    ),
-    strict=True,
-)
 def test_compiler2_output_simulatable_without_prepended_timescale(tmp_path) -> None:
-    """The FSM, AS EMITTED by Compiler 2 (no timescale prepended), should
-    simulate under the stock cocotb generator. It currently cannot.
+    """The FSM, AS EMITTED by Compiler 2 (no timescale prepended), simulates
+    under the stock cocotb generator.
 
-    This isolates the timescale defect from the G12 branch-collapse logic: the
-    DUT next-state is provably correct (see the ternary-order tests and the
-    timescale-prepended functional test above) -- the ONLY thing failing here is
-    the missing `timescale`."""
+    This isolates the timescale fix from the G12 branch-collapse logic: the DUT
+    next-state is provably correct (see the ternary-order tests and the
+    timescale-prepended functional test above). D1 fix: Compiler 2 now emits
+    `timescale 1ns/1ps`, so iverilog can represent the 10 ns clock and the module
+    is simulatable with no hand-prepended directive."""
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
     pytest.importorskip("cocotb", reason="cocotb not installed")
