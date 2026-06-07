@@ -56,6 +56,17 @@ mishandles non-integer values and a few edge shapes:
   `pick_rule` (a gated `agentic_tests/` test), distinct from the deterministic stub
   path already covered.
 
+### Deferred polish & future scope
+
+- **Sized-counter wrap idiom.** The `count <= (count + 1) % 4` form is functionally
+  correct and lints clean under iverilog, but verilator still emits a *cosmetic*
+  `WIDTHTRUNC` on the `% 2^k`. Emitting an explicit wrap (`IF count = MAX THEN 0 ELSE
+  count + 1`) is fully clean on both linters; the fixtures already use the explicit
+  form. A refinement/`pick_rule` policy preference, not a correctness bug.
+- **Tier-2 refinement rules.** `ParallelComposition`, `ExpandFrame`, `ContractFrame`,
+  `WeakenPrecondition`, `StrengthenPostcondition` are designed but not implemented (see
+  [background.md](background.md)) — needed for designs beyond FSM+datapath.
+
 ### Live full-pipeline run
 
 The deterministic suite proves the mechanical path; a **live** end-to-end run (real
