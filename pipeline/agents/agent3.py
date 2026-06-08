@@ -1,12 +1,13 @@
 """
 Agent 3 — Formal specification author and rule picker.
 
-One persona / system prompt / knowledge base; four entry points:
+One persona / system prompt / knowledge base; five entry points:
 
     generate_formal_spec(summary)                -> FormalSpec
     revise_on_tlc(spec, tlc_errors)             -> FormalSpec
     pick_rule(applicable_rules, spec)            -> {"rule_name": str, "params": dict}
     revise_on_cocotb(spec, sim_log)             -> FormalSpec
+    critique_refinement(abstract, concrete, ...) -> {"verdict": str, "issues": [...], "reasoning": str}
 
 SDK choice: Anthropic Python SDK (`anthropic` package) speaking directly to
 Anthropic's /v1/messages endpoint using ANTHROPIC_API_KEY from .env.
@@ -14,7 +15,15 @@ This is the actual runtime backing of the Claude Agent SDK pattern.
 
 NOTE: `pick_rule` is a ONE-SHOT structured-output call with NO tools and NO
 internal loop. Giving it tools would break the bounded-action-space invariant.
-See docs/handoff_runtime_agents.md §5.
+See docs/agents.md (the bounded-action-space invariant).
+
+NOTE: `critique_refinement` is ALSO a one-shot structured-output call with NO
+tools — it is a pure read-only refinement-correctness critic that returns an
+accept/reject verdict. It is the runtime backing of pass6_checker: pass6 cannot
+work as an engine pass (it has no rule to "pick"), so it runs here as its own
+gating critic call. The no-tool design here is about keeping the critic a simple,
+mockable verdict function; the bounded-action-space invariant proper is still
+about `pick_rule` only.
 
 Key detection: if ANTHROPIC_API_KEY is the placeholder value or is missing, a
 clear, actionable error is raised at call time so stages 1-2 can still run
@@ -25,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 try:
@@ -35,6 +45,8 @@ except ImportError:
 
 from pipeline.schemas.summary_schema import SpecSummary
 from pipeline.schemas.tla_schema import FormalSpec
+from pipeline.usage import log_usage, check_budget
+from pipeline.refinement_templates import pass6_checker
 
 # ---------------------------------------------------------------------------
 # Key validation
@@ -83,6 +95,34 @@ def _get_client() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# messages.create wrapper — adapt to models that dropped `temperature`
+# ---------------------------------------------------------------------------
+# Some models (e.g. Claude Opus 4.8) have DEPRECATED the `temperature` parameter
+# and return 400 if it is sent. We don't hardcode the list: the first time a
+# model rejects temperature we strip it, retry, and remember the model so later
+# calls omit it up front. A 400 is not billed, so the one-time probe is free.
+# This preserves temperature=0.0 (determinism) for models that still accept it.
+_NO_TEMPERATURE: set[str] = set()
+
+
+def _create(client: Any, **kwargs: Any) -> Any:
+    """client.messages.create that adapts to models lacking `temperature`."""
+    model = kwargs.get("model", "")
+    if model in _NO_TEMPERATURE:
+        kwargs.pop("temperature", None)
+    try:
+        return client.messages.create(**kwargs)
+    except _anthropic_module.APIStatusError as exc:
+        message = str(getattr(exc, "message", "") or exc).lower()
+        if (getattr(exc, "status_code", None) == 400
+                and "temperature" in message and "temperature" in kwargs):
+            _NO_TEMPERATURE.add(model)
+            kwargs.pop("temperature", None)
+            return client.messages.create(**kwargs)
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Model constant
 # ---------------------------------------------------------------------------
 
@@ -93,6 +133,34 @@ def _get_client() -> Any:
 # this; the literal below is only a sane default if the env var is unset.
 _DEFAULT_AGENT3_MODEL = "claude-opus-4-5"
 _AGENT3_MODEL = os.environ.get("AGENT3_MODEL") or _DEFAULT_AGENT3_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Budget guard — refuse calls before cumulative Agent 3 spend hits the cap.
+# Reads the usage ledger via pipeline.usage.check_budget. Cap + reserve are
+# read from the environment on every check so they can be tuned in .env without
+# code edits (defaults: $100 total, $0.50 pre-flight reserve for the in-flight
+# call that hasn't been logged yet). check_budget raises usage.BudgetExceeded,
+# which propagates to the stage node and becomes a status=error artifact.
+# ---------------------------------------------------------------------------
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return default
+
+
+def _check_budget() -> None:
+    """Raise usage.BudgetExceeded if Agent 3 is at/over its USD budget."""
+    check_budget(
+        "agent3",
+        _env_float("AGENT3_BUDGET_USD", 100.0),
+        _env_float("AGENT3_BUDGET_RESERVE_USD", 0.50),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +200,16 @@ When generating or revising a FormalSpec:
   transition's "updates" dict (use the current value expression if unchanged).
 - Invariants must be expressed as plain-English boolean clauses.
 - Conditions use AND, OR, NOT — Compiler 1 translates to TLA+ syntax.
+- In conditions AND in update expressions, use SYMBOLIC comparison operators:
+  `=` (equal), `/=` (not equal), `<`, `>`, `<=`, `>=`. Do NOT write English
+  comparison words like "equals", "less than", or "greater than" — they are not
+  parsed and will produce broken RTL. Boolean connectives may stay as AND/OR/NOT.
+  Example: write `count < 3` and `count = 3`, never `count less than 3`.
+- Do NOT declare the clock or the reset signal as state variables. The clock is
+  implicit (every clocked update happens on the rising edge) and the reset is
+  handled by the pipeline. Model only the true state registers of the design;
+  reference the reset only inside a guard if needed, never as a "variables" entry
+  or an "updates" target.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """
@@ -178,7 +256,7 @@ def _handle_tool_call(tool_name: str, tool_input: dict) -> str:
 # Internal agentic loop (tool-using call types)
 # ---------------------------------------------------------------------------
 
-def _run_with_tools(user_message: str) -> str:
+def _run_with_tools(user_message: str, call_type: str | None = None) -> str:
     """
     Run an agentic tool-use loop with ANTHROPIC_API_KEY and the Agent 3 model.
 
@@ -187,18 +265,31 @@ def _run_with_tools(user_message: str) -> str:
 
     Used by: generate_formal_spec, revise_on_tlc, revise_on_cocotb.
     NOT used by: pick_rule (which has no tools and no loop).
+
+    call_type labels the usage-ledger entries with the originating entry point.
+    Each loop iteration is a separate billable call, so each is logged.
     """
     client = _get_client()
     messages: list[dict] = [{"role": "user", "content": user_message}]
 
     while True:
-        response = client.messages.create(
+        _check_budget()  # pre-flight: stop before exceeding the Agent 3 budget
+        response = _create(
+            client,
             model=_AGENT3_MODEL,
             max_tokens=4096,
             temperature=0.0,
             system=_SYSTEM_PROMPT,
             tools=_TOOLS,
             messages=messages,
+        )
+
+        # Record token usage for this iteration (never raises).
+        log_usage(
+            agent="agent3",
+            model=_AGENT3_MODEL,
+            usage=getattr(response, "usage", None),
+            call_type=call_type,
         )
 
         # Collect text and tool_use blocks from the response
@@ -234,6 +325,59 @@ def _run_with_tools(user_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Robust JSON extraction from model output
+# ---------------------------------------------------------------------------
+# Opus 4.8 is a reasoning model and sometimes prepends an explanation before the
+# JSON on the revise_* calls, despite the system prompt's "JSON only" rule. Parse
+# defensively: strict parse first, then strip a markdown fence, then extract the
+# first balanced {...} object (string-aware, so braces inside string values do
+# not throw off the depth count). Prose has no braces, so it is skipped.
+
+def _extract_json(text: str) -> dict:
+    """Parse a JSON object from model output that may include prose or fences."""
+    s = (text or "").strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    if s.startswith("```"):
+        inner = re.sub(r"^```[A-Za-z0-9]*\s*\n?", "", s)
+        inner = re.sub(r"\n?```\s*$", "", inner).strip()
+        try:
+            return json.loads(inner)
+        except json.JSONDecodeError:
+            s = inner
+
+    start = s.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(s[start:i + 1])
+
+    raise ValueError(
+        f"Agent 3 returned no parseable JSON object. First 200 chars: {s[:200]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -254,8 +398,8 @@ SpecSummary:
 
 Return a single JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
-    data = json.loads(raw)
+    raw = _run_with_tools(user_message, call_type="generate_formal_spec")
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)
 
 
@@ -283,8 +427,8 @@ TLC errors:
 
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
-    data = json.loads(raw)
+    raw = _run_with_tools(user_message, call_type="revise_on_tlc")
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)
 
 
@@ -295,7 +439,7 @@ def pick_rule(applicable_rules: list[dict], spec: dict, *, system_prompt: str | 
     BOUNDED-ACTION-SPACE INVARIANT: this call uses NO tools and NO internal
     loop. The model must return a structured choice in one shot.
 
-    See docs/handoff_runtime_agents.md §5.
+    See docs/agents.md (the bounded-action-space invariant).
 
     Args:
         applicable_rules: List of rule descriptor dicts, each with at least:
@@ -330,16 +474,28 @@ Return a JSON object with exactly these fields:
 No other text, no markdown. Return only the JSON object.
 """
 
+    # Pre-flight budget check (same cap as the tool-using call types).
+    _check_budget()
+
     # NO tools — this is a one-shot structured-output call.
     # The `tools` argument is OMITTED entirely (not passed as []): the Anthropic
     # API rejects an explicitly empty tools list, and omitting it is what actually
     # enforces the bounded-action-space invariant (no tool surface on pick_rule).
-    response = client.messages.create(
+    response = _create(
+        client,
         model=_AGENT3_MODEL,
         max_tokens=512,
         temperature=0.0,
         system=system_prompt if system_prompt is not None else _SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
+    )
+
+    # Record token usage for this one-shot call (never raises).
+    log_usage(
+        agent="agent3",
+        model=_AGENT3_MODEL,
+        usage=getattr(response, "usage", None),
+        call_type="pick_rule",
     )
 
     raw = ""
@@ -348,7 +504,7 @@ No other text, no markdown. Return only the JSON object.
             raw += block.text
 
     raw = raw.strip()
-    result = json.loads(raw)
+    result = _extract_json(raw)
 
     # Validate shape
     if "rule_name" not in result or "params" not in result:
@@ -388,6 +544,114 @@ Cocotb simulation log:
 
 Return a single corrected JSON object matching the FormalSpec schema. No other text.
 """
-    raw = _run_with_tools(user_message)
-    data = json.loads(raw)
+    raw = _run_with_tools(user_message, call_type="revise_on_cocotb")
+    data = _extract_json(raw)
     return FormalSpec.model_validate(data)
+
+
+def critique_refinement(
+    abstract_spec: dict,
+    concrete_spec: dict,
+    *,
+    abstraction_mapping: dict | None = None,
+) -> dict:
+    """
+    Refinement-correctness critic — a pure, read-only accept/reject GATE.
+
+    This is the runtime backing of pass6_checker. It is a ONE-SHOT structured-
+    output call with NO tools and NO internal loop. The critic independently
+    checks that `concrete_spec` correctly refines `abstract_spec` and returns a
+    verdict that gates compilation in stage3: 'accept' → compile, 'reject' → halt
+    with the critic's issues surfaced in the artifact.
+
+    Args:
+        abstract_spec: The abstract engine-spec dict (pre-refinement).
+        concrete_spec: The refined engine-spec dict (post-refinement, RTL-style).
+        abstraction_mapping: Optional explicit abstraction mapping; falls back to
+            concrete_spec.get("abstraction_mapping", {}) then {}.
+
+    Returns:
+        {
+          "verdict":  "accept" | "reject",
+          "issues":   [str, ...],   # human-readable problems (empty on accept)
+          "reasoning": str          # one-paragraph justification
+        }
+
+    The verdict is normalised: any non-'accept' verdict (including the critic's
+    own 'fail'/'unknown' vocabulary, or a malformed response) is treated as
+    'reject' so the gate fails CLOSED — a bad/uncertain refinement never compiles.
+    """
+    client = _get_client()
+
+    if abstraction_mapping is None:
+        abstraction_mapping = concrete_spec.get("abstraction_mapping", {}) or {}
+
+    user_message = pass6_checker.USER_TEMPLATE.format(
+        abstract_spec_json=json.dumps(abstract_spec, indent=2),
+        concrete_spec_json=json.dumps(concrete_spec, indent=2),
+        mapping_json=json.dumps(abstraction_mapping, indent=2),
+    )
+
+    # Pre-flight budget check (same cap as the other Agent 3 call types).
+    _check_budget()
+
+    # NO tools — one-shot structured-output critic call. The pass6_checker
+    # SYSTEM prompt elicits the accept/reject verdict JSON (see that module).
+    response = _create(
+        client,
+        model=_AGENT3_MODEL,
+        max_tokens=1024,
+        temperature=0.0,
+        system=pass6_checker.SYSTEM,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    # Record token usage for this one-shot call (never raises).
+    log_usage(
+        agent="agent3",
+        model=_AGENT3_MODEL,
+        usage=getattr(response, "usage", None),
+        call_type="critique_refinement",
+    )
+
+    raw = ""
+    for block in response.content:
+        if block.type == "text":
+            raw += block.text
+    raw = raw.strip()
+
+    result = _extract_json(raw)
+    return _normalise_verdict(result)
+
+
+def _normalise_verdict(result: dict) -> dict:
+    """
+    Coerce a critic response into the canonical accept/reject verdict shape.
+
+    Fails CLOSED: only an explicit 'accept' verdict accepts; everything else
+    (the critic's 'fail'/'unknown', a missing/garbled field, or a non-dict)
+    becomes 'reject' so a bad or uncertain refinement is never compiled.
+    """
+    if not isinstance(result, dict):
+        return {
+            "verdict": "reject",
+            "issues": ["Critic returned a non-object response."],
+            "reasoning": f"Unparseable critic output: {result!r}",
+        }
+
+    raw_verdict = str(result.get("verdict", "")).strip().lower()
+    verdict = "accept" if raw_verdict == "accept" else "reject"
+
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    issues = [str(i) for i in issues]
+
+    reasoning = str(result.get("reasoning", "") or "")
+
+    # If the critic used its native 'fail'/'unknown' vocabulary or any other
+    # non-accept verdict, record that as an issue so the gate's error is honest.
+    if verdict == "reject" and raw_verdict not in ("reject", ""):
+        issues = issues + [f"Critic verdict was '{raw_verdict}' (treated as reject)."]
+
+    return {"verdict": verdict, "issues": issues, "reasoning": reasoning}

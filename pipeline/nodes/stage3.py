@@ -46,6 +46,60 @@ from pipeline.schemas.tla_schema import FormalSpec
 MAX_TLC_RETRIES = 3
 BACKTRACK_STEPS = 3   # number of refinement steps to roll back on a refinement fault
 
+# Token/cost cap on the LIVE refinement loop — the number of pick_rule (Agent-3,
+# LLM) calls each engine pass may make before it stalls. A real design needs only a
+# handful of rule applications per pass; the previous caps (50/30/30/20/20 per
+# structured pass, plus the engine's 200-step default on the catch-all and backtrack
+# passes) let a cycling live picker burn hundreds of Agent-3 calls — and hundreds of
+# thousands of input tokens — on a single run. A stalled pass just logs a
+# refinement_warning and the run continues, so keeping these small is safe.
+_PASS_MAX_STEPS = 8        # per structured pass (was 50/30/30/20/20)
+
+# --- Catch-all as the SOLE refinement driver (2026-06-08) -------------------
+# The five structured passes (_PASS_CONFIGS below) are DEFINED but NO LONGER
+# EXECUTED: the loop is gated off by _RUN_STRUCTURED_PASSES. The catch-all
+# engine.run() (base prompt, ALL rules) is the single refinement driver.
+#
+# WHY: the live 2-bit-counter run (artifacts/3f7e08d09b4b) showed the structured
+# passes were badly behaved — 16 of 26 pick_rule calls were JUNK. Passes 3
+# (datapath) and 5 (mapping) each spun to their step cap making Agent 3 invent
+# dead IntroduceVariable's; those dead vars are dropped at codegen so the OUTPUT
+# was clean, but (a) ~62% of the LLM budget was wasted, and (b) the persisted
+# refinement_chain.json became NON-REPLAYABLE: passes 3 and 5 both committed a
+# variable named 'count_concrete', and because each pass's apply() uniqueness
+# check only sees the live in-memory spec (not the cross-pass committed prefix
+# concatenated on disk by the engine's G13 logic), replaying the full chain from
+# scratch raises "IntroduceVariable: variable 'count_concrete' already exists" —
+# violating the engine's replay invariant and breaking the cocotb-failure
+# backtrack path if it ever fired. Root cause: the pass system prompts assume
+# every design needs every phase (a counter has no handshake/datapath/mapping
+# phase) and ask for a verbose pass-REPORT object incompatible with pick_rule's
+# {rule_name, params} contract.
+#
+# The catch-all already did the REAL work in 2-3 clean steps and is proven by the
+# offline e2e suite (FSM + ALU + counter). Collapsing to a SINGLE engine.run()
+# also eliminates the multi-pass chain concatenation that produced the
+# non-replayable chain: with no prior passes, committed_prefix is empty, so the
+# on-disk chain is exactly this one run's chain, and a duplicate IntroduceVariable
+# name can never be committed within a single run (apply() raises -> the engine
+# excludes the choice and never appends it).
+#
+# _PASS_CONFIGS and the pass-template files are RETAINED (not deleted): they are
+# pinned by tests/test_pass_templates.py (data-structure assertions only) and kept
+# for possible future re-enablement. To re-enable the schedule, flip this flag.
+_RUN_STRUCTURED_PASSES = False
+
+# Catch-all step cap. As the SOLE driver this must have headroom for the hardest
+# in-repo design. Recon: the hardest design (multi-op ALU) reaches RTL-style in
+# only 2 successful applies (Initialization, Iteration); the counter needs 3.
+# But max_steps counts EVERY loop iteration (strikes, excluded re-picks, TLC-gate
+# rejections), not just commits, so a free live picker that explores before
+# converging needs slack. 16 gives ~5x margin over the 3-step proven worst case.
+# Raising the cap is cost-free: Iteration idempotency + the engine's no-op /
+# 3-strike->backtrack guards make cycling impossible, so a larger cap only widens
+# the budget — it cannot loop. (Also inherited by run_stage3_backtrack_refinement.)
+_CATCHALL_MAX_STEPS = 16   # sole-driver cap (was 12; engine default is 200)
+
 try:
     from pipeline.agents import agent3 as _agent3
     _AGENT3_AVAILABLE = True
@@ -87,32 +141,49 @@ try:
         pass2_handshake,
         pass3_datapath,
         pass4_reset,
+        pass5_mapping,
+        pass6_checker,
     )
     _PASS_CONFIGS: list[dict] = [
         {
             "name": "pass1_fsm",
             "allowed": {"SequentialComposition", "Iteration"},
             "system": pass1_fsm.SYSTEM,
-            "max_steps": 50,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass2_handshake",
             "allowed": {"Alternation", "IntroduceVariable"},
             "system": pass2_handshake.SYSTEM,
-            "max_steps": 30,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass3_datapath",
             "allowed": {"Assignment", "IntroduceVariable"},
             "system": pass3_datapath.SYSTEM,
-            "max_steps": 30,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass4_reset",
             "allowed": {"Initialization"},
             "system": pass4_reset.SYSTEM,
-            "max_steps": 20,
+            "max_steps": _PASS_MAX_STEPS,
         },
+        # Pass 5 — mapping-completeness audit. May only supply a missing
+        # mapping symbol (IntroduceVariable); no behavioral rewrite permitted.
+        {
+            "name": "pass5_mapping",
+            "allowed": {"IntroduceVariable"},
+            "system": pass5_mapping.SYSTEM,
+            "max_steps": _PASS_MAX_STEPS,
+        },
+        # NOTE: pass6_checker is intentionally NOT an engine pass. It is a pure
+        # read-only refinement-correctness critic with no rule to "pick", so it
+        # cannot run inside the engine's pick_rule loop. It runs instead as a
+        # direct one-shot Agent-3 critic GATE (see _run_refinement_critic below
+        # and agent3.critique_refinement) that accepts/rejects the refined spec
+        # BEFORE Compiler 2. pass6_checker is still imported above for its SYSTEM
+        # prompt, which agent3.critique_refinement sends.
     ]
     _PASSES_AVAILABLE = True
 except Exception:
@@ -163,14 +234,57 @@ def _make_tlc_gate(module_name: str):
     return _gate
 
 
-def _make_pass_pick(pass_system_prompt: str):
-    """Return a pass-specific pick_rule callable."""
+def _log_pick_decision(
+    run_id: str | None,
+    pass_name: str | None,
+    applicable_rules: list[dict],
+    choice: dict,
+) -> None:
+    """Append one pick_rule decision to refinement_decisions.jsonl (best-effort).
+
+    The committed refinement_chain.json records only SUCCESSFUL applies; it does
+    NOT show what each pass offered, what Agent 3 chose on calls the engine later
+    rejected (invalid name, already-excluded, or TLC-gated), or which pass a step
+    came from. This incremental, append-as-you-go log captures all of that, so a
+    single metered live run yields a COMPLETE refinement trace — a stall is then
+    debuggable offline without burning another run. Never raises: a logging
+    failure must not break a pipeline run.
+    """
+    if not run_id:
+        return
+    try:
+        path = Path("artifacts") / run_id / "refinement_decisions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "pass": pass_name,
+            "offered": [r.get("name") for r in applicable_rules],
+            "chosen": choice.get("rule_name"),
+            "params": choice.get("params"),
+        }
+        with path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+def _make_pass_pick(pass_system_prompt: str, *, run_id: str | None = None,
+                    pass_name: str | None = None):
+    """Return a pass-specific pick_rule callable.
+
+    When run_id is given, every decision is appended to refinement_decisions.jsonl
+    (best-effort) so a mid-run stall still leaves a full trace of what this pass
+    offered and chose — including picks the engine later rejects.
+    """
     def _pick(applicable_rules: list[dict], s: dict) -> dict:
         if not _AGENT3_AVAILABLE:
             if applicable_rules:
-                return {"rule_name": applicable_rules[0]["name"], "params": {}}
+                choice = {"rule_name": applicable_rules[0]["name"], "params": {}}
+                _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+                return choice
             raise RuntimeError("No applicable rules and Agent 3 unavailable")
-        return _agent3.pick_rule(applicable_rules, s, system_prompt=pass_system_prompt)
+        choice = _agent3.pick_rule(applicable_rules, s, system_prompt=pass_system_prompt)
+        _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+        return choice
     return _pick
 
 
@@ -184,14 +298,53 @@ def _make_pass_termination(allowed: set[str]):
     return _done
 
 
-def _make_pick_rule_callable(system_prompt: str | None = None):
+def _run_refinement_critic(
+    abstract_engine_spec: dict, refined_engine_spec: dict
+) -> dict | None:
+    """
+    Run the pass6_checker refinement-correctness critic as a one-shot Agent-3 GATE.
+
+    This is the SINGLE, MOCKABLE boundary for the critic. Wave 2 tests stub THIS
+    function (`pipeline.nodes.stage3._run_refinement_critic`) — or the underlying
+    `pipeline.agents.agent3.critique_refinement` — to return accept/reject WITHOUT
+    a live LLM call. It makes NO live call unless actually invoked at the gate.
+
+    Returns:
+        The verdict dict {"verdict","issues","reasoning"} from the critic, or
+        None to mean "no verdict — proceed to compile" (used when Agent 3 is
+        unavailable, e.g. no ANTHROPIC_API_KEY, or the critic call itself errors).
+        The critic is an additive safety net: its UNAVAILABILITY must not halt an
+        otherwise-valid run, but an explicit 'reject' DOES halt (see the gate).
+    """
+    if not _AGENT3_AVAILABLE:
+        return None
+    try:
+        return _agent3.critique_refinement(
+            abstract_engine_spec,
+            refined_engine_spec,
+            abstraction_mapping=refined_engine_spec.get("abstraction_mapping", {}),
+        )
+    except Exception:
+        # Critic transport/parse failure — skip the gate rather than halt a run
+        # that otherwise refined cleanly. The verdict normaliser already fails
+        # closed on a PARSEABLE-but-bad response; this branch is only for the
+        # critic being unreachable. Proceeding here matches the no-key path.
+        return None
+
+
+def _make_pick_rule_callable(system_prompt: str | None = None, *,
+                             run_id: str | None = None, pass_name: str = "catchall"):
     """Return the default (catch-all) pick_rule callable, optionally with a custom prompt."""
     def pick_rule(applicable_rules: list[dict], spec: dict) -> dict:
         if not _AGENT3_AVAILABLE:
             if applicable_rules:
-                return {"rule_name": applicable_rules[0]["name"], "params": {}}
+                choice = {"rule_name": applicable_rules[0]["name"], "params": {}}
+                _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+                return choice
             raise RuntimeError("No applicable rules and Agent 3 unavailable")
-        return _agent3.pick_rule(applicable_rules, spec, system_prompt=system_prompt)
+        choice = _agent3.pick_rule(applicable_rules, spec, system_prompt=system_prompt)
+        _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+        return choice
     return pick_rule
 
 
@@ -199,13 +352,64 @@ def _make_pick_rule_callable(system_prompt: str | None = None):
 # Shared TLC → refinement → Compiler 2 pipeline (called by all entry points)
 # ---------------------------------------------------------------------------
 
-def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineState:
+def _input_port_widths(artifact_dir: Path) -> dict[str, int]:
+    """Best-effort {name: width} for the design's INPUT ports from 01_summary.json.
+
+    Used to size free inputs in the reverse bridge (D2): a free input declared
+    multi-bit in the Stage-1 SpecSummary (e.g. a 2-bit ALU `op`) must not be
+    truncated to 1 bit. Returns {} on any error so the bridge falls back to
+    register-feed inference / width-1, never crashing the stage.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        summary = SpecSummary.model_validate(data)
+        return {p.name: p.width for p in summary.ports if p.direction == "input"}
+    except Exception:
+        return {}
+
+
+def _reset_port(artifact_dir: Path) -> str:
+    """Best-effort reset-port name for this design from 01_summary.json (FIX 1).
+
+    The cocotb generator drives ``dut.<SpecSummary.reset_port>``; the emitted
+    Verilog must declare a reset input of the SAME name or the reset floats and
+    the design never resets (the 2-bit counter bug: generator drove `dut.rst`
+    while Compiler 2 emitted a `reset` port). We thread this name into BOTH the
+    reverse bridge and Compiler 2.
+
+    Defaults to "reset" when the summary is missing, unreadable, not a success,
+    or has no reset_port — preserving the prior hardcoded behaviour for designs
+    that name their reset "reset". Mirrors `_input_port_widths`' fail-soft style.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        if data.get("status") != "success":
+            return "reset"
+        summary = SpecSummary.model_validate(data)
+        return summary.reset_port or "reset"
+    except Exception:
+        return "reset"
+
+
+def _run_stage3_from_spec(
+    state: PipelineState,
+    spec: FormalSpec,
+    port_widths: dict[str, int] | None = None,
+    reset_port: str = "reset",
+) -> PipelineState:
     """
     Run the TLC loop, refinement engine, and Compiler 2 for a given FormalSpec.
 
     Writes 02_formal_spec.json and 03_rtl_output.json before returning.
     Used by run_stage3, run_stage3_revise_cocotb, and (indirectly) as a model
     for run_stage3_backtrack_refinement.
+
+    port_widths: {name: width} hints (from the SpecSummary input ports) used to
+    size free inputs in the reverse bridge (D2). None → bridge falls back to
+    register-feed inference / width-1.
+    reset_port: the design's reset input name (FIX 1), threaded into BOTH the
+    reverse bridge and Compiler 2 so the emitted reset port matches the cocotb
+    generator's `dut.<reset_port>`. Defaults to "reset".
     """
     run_id = state["run_id"]
     artifact_dir = Path("artifacts") / run_id
@@ -257,20 +461,39 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
 
     # ---- Refinement Engine ----
     rtl_tla_source = tla_source   # fallback if engine fails
+    # refinement_ok stays False until the engine actually produces RTL-style
+    # TLA+. If we fall back to the UNREFINED tla_source (engine unavailable or
+    # threw), the emitted Verilog is from the abstract spec, not the refined
+    # one — that must be reported as 'partial', never 'success' (G07).
+    refinement_ok = False
+    abstract_engine_spec: dict | None = None   # pre-refinement, for the critic gate
+    refined_engine_spec: dict | None = None    # post-refinement, for the critic gate
 
     if _ENGINE_AVAILABLE:
         try:
             current_spec = formal_spec_to_engine_spec(spec)
+            abstract_engine_spec = formal_spec_to_engine_spec(spec)  # frozen copy
             tlc_gate = _make_tlc_gate(spec.module_name)
             refinement_warnings: list[str] = []
 
-            if _PASSES_AVAILABLE:
+            # Structured-pass schedule — GATED OFF (_RUN_STRUCTURED_PASSES).
+            # See the module-level rationale near _CATCHALL_MAX_STEPS: the five
+            # passes wasted ~62% of the LLM budget on junk IntroduceVariable picks
+            # and produced a NON-REPLAYABLE cross-pass chain. The catch-all below
+            # is now the sole driver. _PASS_CONFIGS / _make_pass_pick /
+            # _make_pass_termination are retained (pinned by
+            # tests/test_pass_templates.py, kept for future re-enablement) and are
+            # simply not invoked while the flag is False.
+            if _PASSES_AVAILABLE and _RUN_STRUCTURED_PASSES:
                 for pass_cfg in _PASS_CONFIGS:
                     allowed = pass_cfg["allowed"]
                     try:
                         current_spec = _engine_run(
                             current_spec,
-                            _make_pass_pick(pass_cfg["system"]),
+                            _make_pass_pick(
+                                pass_cfg["system"],
+                                run_id=run_id, pass_name=pass_cfg["name"],
+                            ),
                             run_id=run_id,
                             tlc_check=tlc_gate,
                             allowed_rule_names=allowed,
@@ -280,23 +503,61 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
                     except RefinementStall as e:
                         refinement_warnings.append(f"{pass_cfg['name']} stalled: {e}")
 
+            # Catch-all pass: base prompt, ALL rules, sole refinement driver.
             current_spec = _engine_run(
                 current_spec,
-                _make_pick_rule_callable(),
+                _make_pick_rule_callable(run_id=run_id, pass_name="catchall"),
                 run_id=run_id,
                 tlc_check=tlc_gate,
+                max_steps=_CATCHALL_MAX_STEPS,
             )
 
             if refinement_warnings:
                 formal_artifact["refinement_warnings"] = refinement_warnings
                 write_artifact(formal_path, formal_artifact)
 
-            rtl_tla_source = engine_spec_to_rtl_tla(current_spec, spec.module_name)
+            rtl_tla_source = engine_spec_to_rtl_tla(
+                current_spec, spec.module_name,
+                port_widths=port_widths, reset_port=reset_port,
+            )
+            refined_engine_spec = current_spec
+            refinement_ok = True
 
         except Exception as exc:
+            # Refinement threw. rtl_tla_source stays the UNREFINED fallback and
+            # refinement_ok stays False, so the RTL artifact below is written
+            # 'partial' (G07) — the Verilog will be from the abstract spec.
             formal_artifact["refinement_error"] = f"{exc}\n{traceback.format_exc()}"
             formal_artifact["status"] = "partial"
             write_artifact(formal_path, formal_artifact)
+
+    # ---- Refinement-correctness critic GATE (pass6_checker) ----
+    # Runs ONLY when refinement actually produced a refined spec. A read-only
+    # one-shot Agent-3 critic accepts/rejects the refinement BEFORE Compiler 2.
+    # On 'reject' we must NOT compile a bad refinement: write a non-success RTL
+    # artifact so _route_after_stage3 halts, with the critic's issues in `error`.
+    if refinement_ok and refined_engine_spec is not None and abstract_engine_spec is not None:
+        verdict = _run_refinement_critic(abstract_engine_spec, refined_engine_spec)
+        if verdict is not None and verdict.get("verdict") != "accept":
+            issues = verdict.get("issues", [])
+            reasoning = verdict.get("reasoning", "")
+            critic_msg = (
+                "Refinement-correctness critic REJECTED the refined spec; "
+                "compilation halted to avoid emitting unverified RTL. "
+                f"Issues: {issues}. Reasoning: {reasoning}"
+            )
+            # Record the verdict on the formal-spec artifact for debugging.
+            formal_artifact["status"] = "partial"
+            formal_artifact["critic_verdict"] = verdict
+            write_artifact(formal_path, formal_artifact)
+            # Write the routed artifact with a non-success status so the router
+            # halts (G07: 'partial' → halt). The honest error is on disk.
+            write_artifact(rtl_path, {
+                "status":      "partial",
+                "module_name": spec.module_name,
+                "error":       critic_msg,
+            })
+            return state
 
     # ---- Compiler 2 → Verilog-2001 ----
     if not _COMPILER2_AVAILABLE:
@@ -308,16 +569,25 @@ def _run_stage3_from_spec(state: PipelineState, spec: FormalSpec) -> PipelineSta
         return state
 
     try:
-        compiler = RTLTLACompiler(rtl_tla_source)
+        compiler = RTLTLACompiler(rtl_tla_source, reset_port=reset_port)
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
-        write_artifact(rtl_path, {
-            "status":       "success",
+        # G07: only 'success' when refinement actually ran. If we fell back to
+        # the unrefined tla_source, the RTL is from the abstract spec → 'partial'.
+        rtl_artifact = {
+            "status":       "success" if refinement_ok else "partial",
             "module_name":  spec.module_name,
             "verilog_path": str(verilog_file),
             "verilog":      verilog,
-        })
+        }
+        if not refinement_ok:
+            rtl_artifact["error"] = (
+                "RTL compiled from the UNREFINED/abstract TLA+ spec because the "
+                "refinement engine was unavailable or failed; this output is not "
+                "from a completed refinement and must not be treated as verified."
+            )
+        write_artifact(rtl_path, rtl_artifact)
     except Exception as exc:
         _write_error(rtl_path, f"Compiler 2 failed: {exc}\n{traceback.format_exc()}")
 
@@ -370,7 +640,15 @@ def run_stage3(state: PipelineState) -> PipelineState:
         _write_error(rtl_path, msg)
         return state
 
-    return _run_stage3_from_spec(state, spec)
+    # D2: pass the declared input-port widths so multi-bit free inputs aren't
+    # truncated to 1 bit by the reverse bridge.
+    port_widths = {p.name: p.width for p in summary.ports if p.direction == "input"}
+    # FIX 1: thread the design's actual reset-port name so the emitted reset
+    # port matches the cocotb generator's `dut.<reset_port>`.
+    reset_port = summary.reset_port or "reset"
+    return _run_stage3_from_spec(
+        state, spec, port_widths=port_widths, reset_port=reset_port,
+    )
 
 
 def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
@@ -429,7 +707,11 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
 
     # Hand off to the shared pipeline — BUG-2 FIX: we pass the revised spec
     # directly instead of calling run_stage3() which would re-generate from scratch.
-    return _run_stage3_from_spec(state, revised)
+    return _run_stage3_from_spec(
+        state, revised,
+        port_widths=_input_port_widths(artifact_dir),
+        reset_port=_reset_port(artifact_dir),
+    )
 
 
 def run_stage3_backtrack_refinement(state: PipelineState) -> PipelineState:
@@ -525,15 +807,21 @@ Try different rule parameters — focus on reset values, clock domains, and
 update expressions that differ from the choices that led to the failure.
 """
 
-    backtrack_pick = _make_pick_rule_callable(system_prompt=backtrack_system)
+    backtrack_pick = _make_pick_rule_callable(
+        system_prompt=backtrack_system, run_id=run_id, pass_name="backtrack",
+    )
 
     # Write the truncated chain to disk before running the engine.
     # The engine will overwrite refinement_chain.json with the new steps
     # starting from step 0 of this sub-run (the prefix is in _prefix.json).
     chain_path.write_text(json.dumps(truncated_chain, indent=2))
 
-    # Re-run the engine from the truncation point (catch-all pass only — the
-    # structured passes already ran in the original attempt).
+    # Re-run the engine from the truncation point. This has always been
+    # catch-all only (no allowed_rule_names); with the structured passes now
+    # gated off in the forward path too, the original attempt was also a single
+    # catch-all run, so the truncated chain replayed above is a self-contained,
+    # collision-free single-run chain — replay-to-truncation cannot raise the
+    # cross-pass duplicate-name error that motivated the sole-driver change.
     try:
         tlc_gate = _make_tlc_gate(spec.module_name)
         final_spec = _engine_run(
@@ -541,8 +829,13 @@ update expressions that differ from the choices that led to the failure.
             backtrack_pick,
             run_id=run_id,
             tlc_check=tlc_gate,
+            max_steps=_CATCHALL_MAX_STEPS,
         )
-        rtl_tla_source = engine_spec_to_rtl_tla(final_spec, spec.module_name)
+        rtl_tla_source = engine_spec_to_rtl_tla(
+            final_spec, spec.module_name,
+            port_widths=_input_port_widths(artifact_dir),
+            reset_port=_reset_port(artifact_dir),
+        )
     except RefinementStall as exc:
         _write_error(rtl_path, f"Backtrack refinement stalled: {exc}")
         return state
@@ -552,7 +845,7 @@ update expressions that differ from the choices that led to the failure.
 
     # Compiler 2 → Verilog-2001
     try:
-        compiler = RTLTLACompiler(rtl_tla_source)
+        compiler = RTLTLACompiler(rtl_tla_source, reset_port=_reset_port(artifact_dir))
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)

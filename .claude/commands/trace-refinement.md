@@ -11,10 +11,10 @@ Run ID: $ARGUMENTS
    ```
    Step N: <RuleName>
      Params:  <params dict>
-     Hardware meaning: <one-line description from docs/architecture.md>
+     Hardware meaning: <one-line description from docs/refinement.md>
    ```
 
-   Use the hardware meanings from `docs/architecture.md` (Tier-1 rules table):
+   Use the hardware meanings from `docs/refinement.md` (the six-rule table):
    - `Initialization` → Reset behavior: every register gets a default value
    - `Iteration` → Free-running clocked loop: the body is the per-cycle update
    - `SequentialComposition` → Combinational path within one clock cycle

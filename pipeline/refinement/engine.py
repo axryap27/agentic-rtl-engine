@@ -140,6 +140,17 @@ def _save_chain(run_id: str, chain: list[dict]) -> None:
         json.dump(chain, f, indent=2)
 
 
+def _renumber_steps(chain: list[dict]) -> list[dict]:
+    """Return *chain* with globally-monotonic ``step`` indices (0..n-1).
+
+    Replay (``_replay_chain``) ignores the ``step`` field entirely, so this is
+    purely cosmetic for on-disk readability and ``/trace-refinement``. Used when
+    concatenating a same-run_id committed prefix with a new pass's steps so the
+    persisted chain reads as one continuous sequence (G13).
+    """
+    return [{**step, "step": i} for i, step in enumerate(chain)]
+
+
 # ---------------------------------------------------------------------------
 # Chain replay (backtracking substrate)
 # ---------------------------------------------------------------------------
@@ -292,10 +303,38 @@ def run(
         r.__class__.__name__: r for r in RULE_REGISTRY
     }
 
-    # committed chain: list of {"step", "rule_name", "params", "pre_hash", "post_hash"}
+    # G13: Stage 3 calls run() once per structured pass with the SAME run_id,
+    # threading the refined spec in memory between calls. The on-disk chain must
+    # ACCUMULATE across those passes so that _replay_chain(initial_abstract_spec,
+    # on_disk_chain) reconstructs the FINAL multi-pass spec — not just the last
+    # pass. We load whatever prior passes already committed and treat it as an
+    # immutable prefix: this pass appends after it and never backtracks into it.
+    #
+    # Correctness of concatenation: each pass starts from the previous pass's
+    # output spec (passed in as `formal_spec`), which by purity equals
+    # replay(initial, committed_prefix). So replay(initial, prefix + this_pass)
+    # == apply(this_pass) on `formal_spec`. The prefix steps are relative to the
+    # initial spec; this pass's steps are relative to `formal_spec`; appended in
+    # order they replay correctly from the initial spec.
+    committed_prefix: list[dict] = _load_chain(run_id)
+
+    # committed chain for THIS pass: list of
+    # {"step", "rule_name", "params", "pre_hash", "post_hash"}.
+    # Backtracking operates only over this pass's steps (replayed from
+    # `formal_spec`); the prefix is never rolled back.
     chain: list[dict] = []
     # excluded set keyed by chain depth: excluded_at[depth] = set of (rule_name, params_json)
     excluded_at: dict[int, set[tuple[str, str]]] = {}
+    # Per-depth count of FAILED pick attempts (an invalid pick_rule return, or a
+    # re-pick of an already-excluded choice). A plain INTEGER counter — NOT a set
+    # keyed on the rejection text — so that a picker which fails IDENTICALLY every
+    # call (the most common LLM stall: re-emitting the same bad rule name) still
+    # reaches the strike threshold and backtracks, instead of deduping to one
+    # entry and spinning to MAX_STEPS (D3). Re-picking an excluded choice is also
+    # counted, so a pure-function-of-spec picker that keeps returning the same
+    # now-excluded choice backtracks rather than looping (D4). Reset on a
+    # successful commit at a depth so a later revisit gets fresh strikes.
+    invalid_counts: dict[int, int] = {}
     # Current spec
     spec = copy.deepcopy(formal_spec)
 
@@ -303,10 +342,24 @@ def run(
 
     while not termination_check(spec):
         if total_steps >= max_steps:
+            # Report the ACTUAL cap (the max_steps PARAMETER), not the module
+            # default — Stage 3 passes a small per-pass cap, so printing the 200
+            # default here misattributed every capped stall as a 200-step blow-up.
+            # Include the rules still firing (but never terminating) and the tail
+            # of the chain so a stall is debuggable from the artifact alone,
+            # without a re-run.
+            applicable_now = [
+                r.__class__.__name__ for r in RULE_REGISTRY
+                if r.is_applicable(spec)
+                and (allowed_rule_names is None
+                     or r.__class__.__name__ in allowed_rule_names)
+            ]
             raise RefinementStall(
-                f"Refinement exceeded {MAX_STEPS} steps without reaching "
+                f"Refinement exceeded {max_steps} steps without reaching "
                 f"RTL-style. This likely indicates a pick_rule that cycles. "
-                f"Chain length: {len(chain)}."
+                f"Chain length: {len(chain)}. "
+                f"Rules still applicable at stall: {applicable_now}. "
+                f"Last picks: {[s['rule_name'] for s in chain[-8:]]}."
             )
         total_steps += 1
 
@@ -337,22 +390,32 @@ def run(
         ]
 
         # --- Invoke pick_rule (the injected callable, NOT an LLM call here) ---
-        choice = pick_rule(applicable_descs, spec)
+        # A pick_rule FAILURE (the LLM returns unparseable or non-pick JSON, a
+        # transport error, a max_tokens truncation, ...) must NEVER abort the
+        # whole refinement run. Treat it exactly like an invalid return: strike
+        # at this depth and backtrack after 3 (the same D3/D4 policy, extended
+        # to the picker THROWING rather than returning a bad dict). Without this,
+        # one bad Agent-3 response on any pass kills the entire pipeline — the
+        # 2-bit-counter handshake-pass crash that produced a 'partial' artifact.
+        try:
+            choice = pick_rule(applicable_descs, spec)
+        except Exception:
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
+            continue
 
         # --- Validate pick_rule's return ---
         applicable_names = [r.__class__.__name__ for r in applicable]
         error = _validate_pick(choice, applicable_names, excluded_here)
         if error:
-            # Invalid return from pick_rule — count invalid responses at this
-            # depth; after 3, backtrack.
-            excluded_at.setdefault(depth, set()).add(
-                ("__invalid__", json.dumps({"error": error[:120]}, sort_keys=True))
-            )
-            invalid_count = sum(
-                1 for name, _ in excluded_at.get(depth, set())
-                if name == "__invalid__"
-            )
-            if invalid_count >= 3:
+            # Invalid return from pick_rule — count this strike at the current
+            # depth (integer counter, not a set keyed on error text — D3); after
+            # 3 strikes, backtrack.
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
                 spec, chain = _backtrack(
                     formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
                 )
@@ -362,9 +425,17 @@ def run(
         params: dict = choice["params"]
         params_json = json.dumps(params, sort_keys=True)
 
-        # Double-check exclusion (pick_rule may not have honoured the contract)
+        # Double-check exclusion (pick_rule may not have honoured the contract).
+        # A picker that is a pure function of the spec keeps returning the same
+        # now-excluded choice forever; count each re-pick as a strike so the
+        # 3-strike backtrack fires instead of spinning to MAX_STEPS (D4).
         if (rule_name, params_json) in excluded_here:
             excluded_at.setdefault(depth, set()).add((rule_name, params_json))
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
             continue
 
         rule = rule_by_name[rule_name]
@@ -380,6 +451,22 @@ def run(
 
         post_hash = _spec_hash(new_spec)
 
+        # --- No-op guard: an application that does not change the spec made no
+        # progress toward RTL-style. Committing it lets a picker that keeps
+        # choosing an already-satisfied rule (e.g. Iteration on an
+        # already-clocked action — now idempotent) spin: it would append
+        # identical no-op steps until max_steps. Treat a no-op like an invalid
+        # pick: exclude this exact choice here and strike; backtrack after 3 so
+        # the picker is forced toward a rule/params that actually advance.
+        if post_hash == pre_hash:
+            excluded_at.setdefault(depth, set()).add((rule_name, params_json))
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
+            continue
+
         # --- TLC gate: verify the candidate spec before committing ---
         if tlc_check is not None and not tlc_check(new_spec):
             excluded_at.setdefault(depth, set()).add((rule_name, params_json))
@@ -394,7 +481,12 @@ def run(
             "post_hash": post_hash,
         }
         chain.append(step)
-        _save_chain(run_id, chain)
+        # This depth is resolved — clear its strike count so a later backtrack
+        # that revisits it gets a fresh 3-strike budget (D3/D4).
+        invalid_counts.pop(depth, None)
+        # Persist the accumulated chain (prior passes + this pass), renumbered
+        # to a single monotonic sequence for on-disk readability (G13).
+        _save_chain(run_id, _renumber_steps(committed_prefix + chain))
 
         spec = new_spec
 

@@ -6,7 +6,7 @@ Refine one abstract TLA+ action into an explicit finite-state machine with
 concrete control states and a transition relation. Do not touch datapath details.
 
 ALLOWED RULES
-- Sequential Composition
+- SequentialComposition
 - Iteration
 
 PRECONDITIONS (check before acting)

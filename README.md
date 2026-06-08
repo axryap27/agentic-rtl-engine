@@ -186,12 +186,13 @@ Tests that hit the real models live separately and are off by default, so a norm
 | Stage 3 (spec authoring, refinement, codegen) | Built; needs the Agent 3 key for live runs |
 | Stage 4 (simulation) | Built |
 | Diagnoser (failure routing) | Built |
-| Refinement engine + six rules | Built; converges on counter and flip-flop |
-| Deterministic test suite | 58 passing |
+| Refinement engine + six rules | Built; converges on counter, flip-flop, FSM, ALU |
+| Deterministic test suite | 204 passing, 6 xfailed |
+| Offline end-to-end (mocked LLM) | Verified — NL → RTL → cocotb PASS on a traffic-light FSM and a multi-op ALU |
 | Live end-to-end run | Pending Agent 3 key setup |
 
-The full pipeline is wired and the deterministic spine is verified. The next milestone is the first live run, where the LLM drives refinement and the bounded-action-space thesis gets its real test.
+The full pipeline is wired and the deterministic spine is verified — the graph now runs NL → RTL → cocotb PASS offline on medium designs (FSM, ALU) with the LLM boundaries mocked. The next milestone is the first **live** run, where a real LLM drives refinement and the bounded-action-space thesis gets its real test.
 
 ---
 
-Deeper design docs: `docs/architecture.md` (full system), `docs/layers_of_templates.md` (refinement passes), `CLAUDE.md` (contributor contract).
+Deeper design docs live in [`docs/`](docs/README.md) — start with [`docs/architecture.md`](docs/architecture.md) (full system) and [`docs/refinement.md`](docs/refinement.md) (the engine and rules). `CLAUDE.md` is the contributor contract.

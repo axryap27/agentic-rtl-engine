@@ -33,7 +33,10 @@ on disk. It never routes on Python return values or exceptions.
 
   Stage 3 TLC loop → managed inside the stage3 node (up to 3 retries).
   Stage 3 → success: advance to stage4
-           → partial: advance to stage4 (best-effort)
+           → partial: halt (RTL built from the UNREFINED/abstract spec; the
+                      refinement engine was unavailable or threw, so this is
+                      NOT a verified refinement — halting prevents a vacuous
+                      cocotb pass; the error text is on disk in 03_rtl_output)
            → error: halt
 
   Stage 4 → success: terminal (done)
@@ -105,7 +108,11 @@ def _route_after_stage1(state: PipelineState) -> str:
 
 def _route_after_stage3(state: PipelineState) -> str:
     status = _read_status(state["run_id"], "03_rtl_output.json")
-    if status in ("success", "partial"):
+    # G07: only 'success' advances to cocotb. 'partial' means the RTL was built
+    # from the UNREFINED/abstract spec (refinement engine unavailable or threw),
+    # so it must NOT silently advance to the testbench where it could vacuously
+    # pass. Halt with a clear-error artifact already on disk instead.
+    if status == "success":
         return "advance"
     return "halt"
 
@@ -143,14 +150,14 @@ def build_graph() -> StateGraph:
         stage2   (writes testbench artifact; no LLM call — fast)
           ↓
         stage3   (Agent 3: formal spec → TLC loop → refinement → Verilog)
-          ↓ (on success or partial)
+          ↓ (on success; 'partial'/'error' → halt)
         stage4   (cocotb runner)
           ↓
         done | diagnose | halt
                   ↓
         stage3_revise_cocotb (spec fault)
         stage3_backtrack_refinement (refinement fault)
-          ↓ (on success or partial)
+          ↓ (on success; 'partial'/'error' → halt)
         stage4
 
     Note: stage2 and stage3 run sequentially, not truly in parallel. This is

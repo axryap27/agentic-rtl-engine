@@ -1,0 +1,22 @@
+[tool.pytest.ini_options]
+# Two test trees:
+#   tests/           — deterministic, no LLM calls, safe to run anytime (the default suite)
+#   agentic_tests/   — LIVE LLM calls (cost money). Gated off by default; see below.
+#
+# Gating (triple gate, all three must hold for an agentic test to run):
+#   1. marker  — every agentic test carries `live_llm`; `addopts` below deselects it by default
+#   2. opt-in  — the test still skips unless the env var RUN_LIVE_LLM=1 is set (agentic_tests/conftest.py)
+#   3. keys    — the test still skips unless the credentials it needs are present
+#
+# So a normal `pytest` (or `pytest tests/`) never spends money or hits the network.
+# To run the live suite intentionally:
+#   RUN_LIVE_LLM=1 pytest agentic_tests -m live_llm
+markers = [
+    "live_llm: test makes real LLM API calls (costs money). Off by default; opt in with RUN_LIVE_LLM=1 and `-m live_llm`.",
+]
+addopts = "-m 'not live_llm'"
+testpaths = ["tests", "agentic_tests"]
+# Put the repo root on sys.path so `import pipeline` works no matter how pytest
+# is invoked (`pytest` console script vs `python -m pytest`). Without this, the
+# bare `pytest` command fails to import the `pipeline` package.
+pythonpath = ["."]

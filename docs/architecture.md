@@ -1,206 +1,210 @@
-# Agentic RTL Engine — Architecture
+# Architecture
 
-**Input:** Natural language hardware description  
-**Output:** Synthesizable SystemVerilog RTL, verified against a cocotb testbench
+**Input:** a natural-language description of a digital circuit.
+**Output:** a synthesizable Verilog-2001 module, verified against a cocotb testbench.
 
----
-
-## Overview
-
-The pipeline turns a user prompt into RTL through two strictly formatted JSON artifacts. One branch builds and checks formal models (TLA+); the other builds executable tests (cocotb). RTL is only accepted when it passes the testbench; failures feed back into the formal branch.
-
-The formal branch uses **stepwise refinement** to bridge the gap between verified abstract TLA+ and RTL-style TLA+. The refinement step is driven by a finite library of **refinement calculus rules** (see [TLA_specs.png](./TLA_specs.png)). At each refinement step the LLM picks one rule from the applicable set; the engine applies it mechanically. This bounded action space is the project's primary defense against LLM hallucination — refinement correctness is guaranteed by construction because every rule in the library is provably refinement-preserving.
-
-**Orchestration:** [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) coordinates agents, compilers, and retry loops.
-
-For the four-stage artifact contract in `pipeline/` today, see [PIPELINE.md](../PIPELINE.md). For research framing, see [docs.md](./docs.md). This document is the implementation target for the 2-week / 5-person build.
+The pipeline never asks an LLM to write hardware in one shot. It routes the prompt
+through a **formal specification** (TLA+) and lowers that spec toward hardware
+**one provably-correct refinement rule at a time**. The LLM's job is confined to
+interpreting the prompt, authoring/revising the formal spec, and *choosing* which
+rule to apply next from a filtered menu — never emitting RTL freehand. That bounded
+action space is the project's central defense against hallucination.
 
 ---
 
-## High-level flow
+## 1. Pipeline at a glance
 
 ```
-Natural language prompt
-        │
-        ▼
-   Agent 1 ──► JSON(S)          ← summary + golden test vectors
-        │
-        ├──────────────────────────────┐
-        │                              │
-        ▼                              ▼
-   Agent 3 ──► JSON(TLA)          Agent 2 ──► cocotb testbench (.py)
-        │                              │
-        ▼                              │
- Compiler 1 ──► TLA+ ──► TLC           │
-        │ (retry on TLC errors)        │
-        ▼                              │
- Refinement Engine                     │
-   ┌──────────────────────────────┐    │
-   │ while not is_rtl_style:      │    │
-   │   applicable = rules.filter()│    │  ← bounded LLM action space:
-   │   rule,params = LLM picks    │    │    pick from Tier-1 calculus rules
-   │   spec = rule.apply(...)     │    │
-   └──────────────────────────────┘    │
-        │                              │
-        ▼                              │
- RTL-style TLA+ (templates)            │
-        │                              │
-        ▼                              │
- Compiler 2 ──► SystemVerilog RTL ─────┘
-        │
-        ▼
-   Run cocotb against RTL
-        │
-   pass ──► done
-   fail ──► Agent 3 revises JSON(TLA); re-run formal branch (and downstream)
+        Natural-language prompt  (00_nl_spec.json)
+                 │
+                 ▼
+   Stage 1   Agent 1  ──►  SpecSummary           (01_summary.json)
+             prompt → ports + behavior + test vectors        [LLM, proxy]
+                 │
+        ┌────────┴───────────────────────────────────┐
+        ▼                                             ▼
+   Stage 3   Agent 3 + deterministic tools       Stage 2   cocotb generator
+   summary → FormalSpec (TLA+)                    summary → testbench .py
+     → TLC model-check (optional)                 (deterministic, no LLM)
+     → Refinement Engine lowers it,               (02_testbench.py,
+        one rule at a time                          02_testbench_meta.json)
+     → Compiler 2 → Verilog-2001
+   (02_formal_spec.json, 03_rtl_output.json,
+    output.v, refinement_chain.json)
+        │                                             │
+        └────────┬────────────────────────────────────┘
+                 ▼
+   Stage 4   cocotb runner  (Icarus Verilog)     (04_evaluation.json)
+             run output.v against the testbench  (deterministic, no LLM)
+                 │
+        pass ──► done (verified Verilog)
+        fail ──► Diagnose ──► classify fault ──► revise spec  OR  backtrack refinement
+                 (04_diagnosis.json)                 [LLM, proxy]
+```
+
+Three components call an LLM — **Agent 1**, **Agent 3**, and the **Diagnoser**.
+Everything else (Stage 2's generator, both compilers, the refinement engine, the
+cocotb runner) is deterministic Python.
+
+---
+
+## 2. The artifact chain
+
+Each stage reads its inputs and writes its outputs as JSON files under
+`artifacts/<run_id>/`. **LangGraph routes solely on the `status` field of the output
+JSON** — never on Python return values or exceptions. Every node must write a
+status-bearing artifact before returning, even on failure, or the router has nothing
+to act on.
+
+| File | Written by | Read by | `status` values |
+|------|-----------|---------|-----------------|
+| `00_nl_spec.json` | user / `main.py` | Stage 1 | — (not a stage output) |
+| `01_summary.json` | Stage 1 (Agent 1) | Stage 2, Stage 3 | `success`, `error` |
+| `02_testbench.py` + `02_testbench_meta.json` | Stage 2 (generator) | Stage 4 | `success`, `error` |
+| `02_formal_spec.json` | Stage 3 (Agent 3) | Stage 4, Diagnose | `success`, `error`, `partial` |
+| `03_rtl_output.json` (+ `output.v`) | Stage 3 (Compiler 2) | Stage 4, cocotb | `success`, `partial`, `error` |
+| `04_evaluation.json` | Stage 4 (cocotb runner) | terminal, Diagnose | `success`, `error` |
+| `04_diagnosis.json` | Diagnose node | LangGraph routing | `success`, `error` |
+| `refinement_chain.json` | Refinement Engine | debugging, Stage 3 (backtrack) | — (not routed on) |
+
+> The `02_` prefix on `02_formal_spec.json` reflects on-disk ordering, **not** which
+> stage produces it — Stage 3 writes it. The 3-agent design produces **no**
+> `02_pluscal_impl.json`. Filenames are kept exactly as the code uses them.
+
+A schema backs every artifact (`pipeline/schemas/`); the `ArtifactEnvelope` model
+validates the `status` field at write time, so a typo like `"sucess"` raises a
+`ValidationError` instead of silently misrouting the run.
+
+---
+
+## 3. The control plane (LangGraph)
+
+`pipeline/graph.py` wires seven nodes. The entry point is `stage1`; terminal is `END`.
+
+| Node | Runner | On exit, routes via |
+|---|---|---|
+| `stage1` | `run_stage1` (Agent 1) | `_route_after_stage1` |
+| `stage2` | `run_stage2` (generator) | unconditional → `stage3` |
+| `stage3` | `run_stage3` (Agent 3 + engine + Compiler 2) | `_route_after_stage3` |
+| `stage4` | `run_stage4` (cocotb runner) | `_route_after_stage4` |
+| `diagnose` | `run_diagnose` (Diagnoser) | `_route_after_diagnose` |
+| `stage3_revise_cocotb` | `run_stage3_revise_cocotb` | `_route_after_stage3` |
+| `stage3_backtrack_refinement` | `run_stage3_backtrack_refinement` | `_route_after_stage3` |
+
+**Edges and routing logic:**
+
+- `stage1` → `advance`:`stage2` · `retry`:`stage1` · `halt`:`END`
+  Retries on a non-`success` summary up to `_MAX_STAGE1_RETRIES = 1`, then halts.
+- `stage2` → always `stage3`.
+- `stage3` → `advance`:`stage4` · `halt`:`END`
+  **Only `success` advances. `partial` halts immediately (G07):** a `partial` RTL
+  artifact means the Verilog was built from the *unrefined* spec (the engine was
+  unavailable or threw), so it must not reach cocotb where it could vacuously pass.
+- `stage4` → `done`:`END` · `diagnose`:`diagnose` · `halt`:`END`
+  On a cocotb failure, routes to `diagnose` while
+  `retry_counts["stage4_cocotb"] < _MAX_COCOTB_RETRIES (= 2)`, else halts.
+- `diagnose` → `revise_spec`:`stage3_revise_cocotb` · `backtrack`:`stage3_backtrack_refinement`
+  Forks on `state["last_diagnosis"]`: `"refinement"` → backtrack, otherwise → revise.
+- both Stage-3 recovery nodes re-enter `stage4` via `_route_after_stage3`.
+
+**Happy path:** `stage1 → stage2 → stage3 → stage4 → END`.
+
+The thin inter-stage state (`pipeline/state.py`) carries only what routing needs:
+
+```python
+class PipelineState(TypedDict):
+    run_id: str
+    retry_counts: dict[str, int]
+    halt: bool
+    last_diagnosis: str | None   # "spec" | "refinement" | None
 ```
 
 ---
 
-## Artifacts
+## 4. Stages in detail
 
-| Artifact | Role | Requirements |
-|----------|------|----------------|
-| **JSON(S)** | Canonical interpretation of the user spec | Problem statement, test inputs, expected outputs; strict schema |
-| **JSON(TLA)** | Formal design plan before TLA+ is emitted | States, transitions, invariants; strict schema |
-| **TLA+** | Model checked by TLC | Produced by Compiler 1 from JSON(TLA) |
-| **refinement_chain.json** | Ordered list of `(rule_name, params)` applied during refinement — serves as the proof trace | Produced by Refinement Engine |
-| **RTL-style TLA+** | Bridge to hardware | Result of applying refinement calculus rules to the verified TLA+ |
-| **SystemVerilog** | Final RTL | Produced by Compiler 2 from RTL-style TLA+ |
-| **cocotb script** | Simulation testbench | Generated from JSON(S); drives RTL directly |
+**Stage 1 — interpret the prompt.** [Agent 1](agents.md#agent-1) turns the NL prompt
+into a `SpecSummary`: module name, description, typed ports, and golden
+`test_vectors`. Written to `01_summary.json`.
 
----
+**Stage 2 — generate the testbench.** The deterministic
+[cocotb generator](verification.md) turns `SpecSummary.test_vectors` into a cocotb
+`.py` testbench. No LLM — the test vectors already fully specify the bench. (This was
+originally specced as "Agent 2"; the implementation simplified to pure templating.)
 
-## Branch 1 — Formal path (TLA+ → RTL)
+**Stage 3 — author and lower the spec.** The heart of the pipeline:
 
-1. **Agent 3** builds or updates **JSON(TLA)** from **JSON(S)** (and from cocotb/RTL debug logs on failure).
-2. **Compiler 1** turns JSON(TLA) into **TLA+**.
-3. **TLC** model-checks TLA+. On failure, errors are fed back into JSON(TLA) and the compile → TLC loop repeats.
-4. **Refinement Engine** runs a rule-application loop until the spec is RTL-style:
-   - The engine filters the rule library to those applicable to the current spec
-   - The LLM picks one rule and its parameters from the applicable set
-   - The engine applies the rule, producing a new (more concrete) spec
-   - The choice is appended to `refinement_chain.json`
-5. **Compiler 2** emits **SystemVerilog** from RTL-style TLA+.
+1. [Agent 3](agents.md#agent-3) authors a `FormalSpec` (JSON(TLA)) from the summary.
+2. [Compiler 1](compilers.md#compiler-1) emits abstract TLA+; **TLC** optionally
+   model-checks it (skipped if TLC is not installed). On a TLC error, Agent 3 revises
+   and the compile→check loop repeats (≤ 3 attempts).
+3. The [Refinement Engine](refinement.md) lowers the spec to RTL-style, one rule at a
+   time, in a single [catch-all pass](refinement.md#refinement-driver-the-catch-all-pass)
+   (all rules, base prompt). Each step is logged to `refinement_chain.json`.
+4. A one-shot Agent-3 [correctness critic](refinement.md#the-correctness-critic) gates
+   the refined spec before codegen.
+5. [Compiler 2](compilers.md#compiler-2) emits Verilog-2001 to `output.v`.
 
-The refinement loop replaces freeform "rewrite TLA+ as RTL-style TLA+" with a sequence of bounded, verifiable rule applications.
+**Stage 4 — simulate.** The deterministic [cocotb runner](verification.md#the-runner)
+builds `output.v` with Icarus Verilog and runs the Stage-2 testbench, writing a
+structured pass/fail report to `04_evaluation.json`.
 
----
-
-## Branch 2 — Verification path (cocotb)
-
-1. **Agent 2** generates a **cocotb** Python testbench from **JSON(S)**.
-2. The testbench is applied to the generated RTL module.
-3. **Pass** → pipeline returns RTL + artifacts.
-4. **Fail** → trust the testbench (see assumptions below); **Agent 3** adjusts JSON(TLA) and the formal branch runs again.
+**Diagnose — route the fix.** On a Stage-4 failure, the
+[Diagnoser](agents.md#the-diagnoser) classifies the fault as a **spec** fault (wrong
+behavior → Agent 3 revises the FormalSpec) or a **refinement** fault (right behavior,
+wrong rule parameters → backtrack the chain and re-pick). A `build`-phase failure is
+classified `spec` with **no** LLM call.
 
 ---
 
-## Refinement calculus rules
+## 5. Runtime agents vs. deterministic core
 
-The Refinement Engine's rule library is drawn from refinement calculus (Back / von Wright / Morgan style; see [TLA_specs.png](./TLA_specs.png)). Each rule is a Python class with three responsibilities:
+| Component | LLM? | Transport | File |
+|---|:---:|---|---|
+| Agent 1 | ✓ | OpenAI-compatible proxy | `pipeline/agents/agent1.py` |
+| Agent 3 | ✓ | Anthropic SDK (direct) | `pipeline/agents/agent3.py` |
+| Diagnoser | ✓ | OpenAI-compatible proxy | `pipeline/agents/agent_diagnoser.py` |
+| Stage 2 generator | ✗ | — | `pipeline/cocotb/generator.py` |
+| Compiler 1 / Compiler 2 | ✗ | — | `pipeline/compilers/` |
+| Refinement Engine + rules | ✗ | — | `pipeline/refinement/` |
+| cocotb runner | ✗ | — | `pipeline/cocotb/runner.py` |
+| LangGraph orchestration | ✗ | — | `pipeline/graph.py` |
 
-1. **Applicability check** — given a spec, can this rule fire?
-2. **Transformation** — produce the refined spec from the input + parameters
-3. **Verification** — the rule's correctness preserves the refinement relation by construction
-
-### Tier-1 rules (must have)
-
-| Rule | Source | Hardware role |
-|---|---|---|
-| **Initialization** | Table 1 | Reset behavior — every register has an initial value |
-| **Iteration** | Table 1 | Free-running clocked logic; the loop body is the per-cycle update |
-| **Sequential Composition** | Table 2 | Combinational paths within one cycle |
-| **Assignment** | Table 2 | Fundamental register update |
-| **Alternation** | Table 2 | Mux / case / FSM branches |
-| **Introduce Variable** | Table 2 | Add a register or wire |
-
-### Tier-2 rules (stretch goals)
-
-| Rule | Source | Hardware role |
-|---|---|---|
-| **Parallel Composition** | Table 1 | Multiple modules running concurrently |
-| **Expand / Contract Frame** | Table 2 | Manage which variables a step modifies |
-| **Weaken Precondition / Strengthen Postcondition** | Table 2 | Tighten state space bounds |
-
-### Skip (out of scope for 2-week MVP)
-
-Piping / Bidirectional Composition, Procedure rules, full Feasibility — research-grade, not demo-critical.
-
-### LLM action space at each refinement step
-
-| Decision | Determined by |
-|---|---|
-| What rules exist | Library (fixed, ~6 rules in v1) |
-| How a rule transforms a spec | Rule code (deterministic function) |
-| Which rule to apply next | **LLM** |
-| What parameters to use | **LLM** |
-
-The LLM never writes TLA+ during refinement. It receives the current spec plus the filtered list of applicable rules, and returns a single structured choice `(rule_name, parameters)`. The engine applies it.
+The two transports are a deliberate split — see [agents.md](agents.md#two-transports).
 
 ---
 
-## Design assumptions
+## 6. The four design invariants
 
-| Assumption | Rationale |
-|------------|-----------|
-| **JSON(S) is correct for one prompt round** | We cannot know if we misread the user without follow-up questions |
-| **Testbench failures imply formal/RTL issues, not bad tests** | cocotb generation from JSON(S) is a short, reliable path vs. the full TLA+ → RTL chain |
-| **Tier-1 rules are sufficient for demo designs** | The 6 rules cover Init/Reset, clocked iteration, assignment, branching, sequencing, and variable introduction — enough for counters, FFs, FSMs, muxes, simple datapaths. |
-| **LLM can reliably pick rules from a filtered list** | Each refinement step is a small structured-output decision; far smaller error surface than freeform TLA+ generation. |
-| **User re-check of expected I/O** | Optional stopgap if we doubt JSON(S) test vectors (backup only) |
+Everything above exists to protect four properties. Treat them as non-negotiable.
 
----
+1. **Bounded action space.** During refinement the LLM only ever returns a
+   `(rule_name, params)` choice from the engine's filtered applicable set — it never
+   writes TLA+ or Verilog. `Agent3.pick_rule` is a one-shot structured-output call
+   with **no tools and no internal loop**. (Agent 3's spec-authoring calls *are*
+   tool-using; the invariant applies to rule selection.)
 
-## Components
+2. **Deterministic core.** The compilers, the refinement engine and its rules, the
+   cocotb generator, and the runner contain no LLM calls and no nondeterminism. Rule
+   `apply()` is pure, which is what makes the refinement chain replayable and
+   backtracking sound.
 
-| Component | Responsibility |
-|-----------|----------------|
-| **Agent 1** | NL prompt → JSON(S) |
-| **Agent 2** | JSON(S) → cocotb testbench + harness setup |
-| **Agent 3** | JSON(S) → JSON(TLA); revise JSON(TLA) from TLC or testbench failures |
-| **Compiler 1** | JSON(TLA) → TLA+ |
-| **Refinement Engine** | Drives the rule-application loop. Filters applicable rules, applies the LLM's choice, accumulates the refinement chain, supports backtracking. |
-| **Rule Picker (LLM)** | At each refinement step, picks `(rule, params)` from the applicable set. Structured JSON output. |
-| **Rule Library** | `pipeline/refinement/rules/*.py` — one file per rule, each a subclass of `RefinementRule` |
-| **Compiler 2** | RTL-style TLA+ → SystemVerilog |
-| **Pipeline coordination** | LangGraph graph, routing, retries, artifact paths |
+3. **Verilog-2001 only.** Compiler 2 emits a strict Verilog-2001 subset (no `logic`,
+   `always_ff`, `always_comb`, or `initial` in synthesizable modules). This is
+   enforced at codegen by a [banlist verifier](compilers.md#the-banlist), not by
+   prompt retries.
+
+4. **Status-routed artifact contract.** Every node writes a `status`-bearing JSON
+   artifact before returning, even on failure; LangGraph routes only on that status.
+   A validated envelope makes an invalid status a write-time error.
 
 ---
 
-## Retry behavior
+## 7. Where to go next
 
-| Failure point | Action |
-|---------------|--------|
-| TLC rejects TLA+ | Fix JSON(TLA) → Compiler 1 → TLC again |
-| LLM picks an inapplicable refinement rule | Engine rejects the choice and re-prompts with the filtered applicable list |
-| Refinement chain stalls (no applicable rule reaches RTL-style) | Roll back N steps, ask the rule-picker for a different choice at the rollback point (tree search) |
-| cocotb fails on RTL | Fix JSON(TLA) → re-run formal branch through RTL regen → re-test |
-
-Rule application itself never "fails" in the retry sense — if a rule is applicable, applying it produces a valid refinement by construction. Only LLM rule *selection* and downstream cocotb simulation can fail.
-
----
-
-## Scope and team (2 weeks, 5 people)
-
-~60% of person-time goes to the refinement library — the project's load-bearing contribution.
-
-| Person | Focus | Weeks |
-|---|---|---|
-| **A** | `RefinementRule` ABC + Refinement Engine (applicability filtering, rule application, chain serialization, backtracking) | 2 |
-| **B** | Tier-1 rules 1-3 (Initialization, Iteration, Sequential Composition) — encode + unit-test each | 2 |
-| **C** | Tier-1 rules 4-6 (Assignment, Alternation, Introduce Variable) — encode + unit-test each | 2 |
-| **D** | Agent 1 + Agent 3 + Compiler 1 + Rule Picker LLM + LangGraph orchestration | 2 |
-| **E** | Agent 2 (cocotb testbench generator) + Compiler 2 + cocotb runner + integration | 2 |
-
----
-
-## Related documentation
-
-| Document | Contents |
-|----------|----------|
-| [PIPELINE.md](../PIPELINE.md) | LangGraph stages, JSON schemas, milestones |
-| [README.md](../README.md) | Setup, run instructions, current implementation status |
-| [docs.md](./docs.md) | Formal-methods background and refinement concepts |
-| [TLA_specs.png](./TLA_specs.png) | The refinement calculus rules that define the rule-picker's action space |
-| [system_architecture.png](./system_architecture.png) | Reference visual style for diagrams |
+- The agents and their call surface: [agents.md](agents.md)
+- The refinement engine, rules, and passes: [refinement.md](refinement.md)
+- Both compilers and the bridge: [compilers.md](compilers.md)
+- The cocotb generator/runner and tests: [verification.md](verification.md)
+- Theory and the refinement-calculus tables: [background.md](background.md)
+- Current status and open issues: [status.md](status.md)

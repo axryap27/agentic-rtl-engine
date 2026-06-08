@@ -6,9 +6,8 @@ Turn abstract data variables into concrete registers or buffers with explicit
 load, hold, and clear rules. Do not alter control sequencing.
 
 ALLOWED RULES
-- Data Refinement
-- Introduce Variable
 - Assignment
+- IntroduceVariable
 
 PRECONDITIONS (check before acting)
 - Control structure and handshake semantics already exist (Passes 1 and 2 complete).
@@ -48,7 +47,7 @@ Return a single JSON object. Do not include any text outside the JSON.
 
 {
   "pass_name": "datapath_refinement",
-  "rule_used": "<DataRefinement | IntroduceVariable | Assignment>",
+  "rule_used": "<Assignment | IntroduceVariable>",
   "status": "<success | blocked | fail>",
   "diff_summary": "<one sentence describing what changed>",
   "changed_symbols": [],

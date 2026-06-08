@@ -34,8 +34,14 @@ class Alternation(RefinementRule):
         for action in result.get("actions", []):
             if action["name"] == action_name:
                 action["branches"] = copy.deepcopy(branches)
-                # Merge all branch updates into the flat update list so the
-                # action still expresses its full frame for other rules.
+                # The flat `updates` list is only a FRAME summary (one entry per
+                # variable this action touches) used by is_rtl_style and by
+                # other rules' applicability checks. It is NOT the source of the
+                # emitted next-state: the bridge composes the real per-variable
+                # RHS from `branches` (priority-ordered nested IF) so that two
+                # branches assigning the SAME variable both survive into RTL
+                # (G12). First-wins here is therefore safe — the dropped branch
+                # exprs are reconstructed downstream from `branches`.
                 all_vars: dict[str, dict] = {}
                 for branch in branches:
                     for upd in branch.get("updates", []):
