@@ -168,7 +168,15 @@ def _test_vectors_block(summary: SpecSummary) -> str:
 
         # Drive all inputs onto the DUT ports. _fmt_value quotes strings,
         # normalizes bools to 1/0, and leaves ints as bare decimals.
+        # FIX RC2 (defensive): the clock port is owned by the free-running Clock
+        # plus the single RisingEdge below (one tick per vector). A manual
+        # per-vector clk assignment is racy (immediately overridden by the Clock)
+        # and, if a spec toggles clk, falsely implies a half-rate advance. Skip
+        # it so the 1-tick-per-vector contract is enforced even if Agent 1
+        # backslides; reset and all data inputs are still driven.
         for port, val in tv.inputs.items():
+            if port == clk:
+                continue
             lines.append(f"    dut.{port}.value = {_fmt_value(val)}")
 
         # Tick the clock so the DUT processes the inputs.

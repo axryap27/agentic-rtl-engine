@@ -73,6 +73,16 @@ Rules:
 - Every input port (except clk and reset) must appear in at least one test
   vector's "inputs" dict.
 - Include clk as an input port with width 1 if the design is clocked.
+- CLOCK CONTRACT: the test harness owns the clock. Each test vector corresponds
+  to EXACTLY ONE rising clock edge applied by the harness. Do NOT model clock
+  phases by toggling clk across vectors (e.g. 0,1,0,1) — the harness drives the
+  clock automatically and ignores any clk value you provide.
+- If you include clk in a vector's "inputs", you MUST hold it constant at 1 in
+  every vector. Never use 0, and never alternate it.
+- "expected" is the value of each output sampled AFTER that single rising edge.
+  For a state machine or counter, this means the design advances by exactly one
+  step per vector; write the "expected" sequence as the post-edge values for one
+  step per vector (do NOT assume the design advances every other vector).
 - Do NOT include explanatory text outside the JSON object.
 - Respond ONLY with the JSON object — no markdown, no commentary.
 """
