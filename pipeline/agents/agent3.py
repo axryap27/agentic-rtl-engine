@@ -200,6 +200,16 @@ When generating or revising a FormalSpec:
   transition's "updates" dict (use the current value expression if unchanged).
 - Invariants must be expressed as plain-English boolean clauses.
 - Conditions use AND, OR, NOT — Compiler 1 translates to TLA+ syntax.
+- In conditions AND in update expressions, use SYMBOLIC comparison operators:
+  `=` (equal), `/=` (not equal), `<`, `>`, `<=`, `>=`. Do NOT write English
+  comparison words like "equals", "less than", or "greater than" — they are not
+  parsed and will produce broken RTL. Boolean connectives may stay as AND/OR/NOT.
+  Example: write `count < 3` and `count = 3`, never `count less than 3`.
+- Do NOT declare the clock or the reset signal as state variables. The clock is
+  implicit (every clocked update happens on the rising edge) and the reset is
+  handled by the pipeline. Model only the true state registers of the design;
+  reference the reset only inside a guard if needed, never as a "variables" entry
+  or an "updates" target.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """
