@@ -21,12 +21,16 @@ _Last updated: 2026-06-08._
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **260 passed, 0 xfailed** |
+| Deterministic test suite | **265 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
 cocotb PASS offline** on two medium designs — a traffic-light FSM and a multi-op ALU —
 with every LLM boundary mocked, exercising the real engine, both compilers, and the
 cocotb runner.
+
+The full pipeline is now **live-confirmed on TWO design classes**: the 2-bit counter
+(`885b9fc0a06b`) and the traffic-light FSM (`15d3dd354b17`, 2026-06-08). See
+"FSM breadth — live-confirmed green" below.
 
 ---
 
@@ -104,9 +108,46 @@ thesis is demonstrated against a live model. The per-pick decision log
 (`artifacts/<run_id>/refinement_decisions.jsonl`) records the full live trajectory.
 
 Live runs are metered on the Agent-3 Anthropic key ([budget cap](agents.md#budget-guard))
-and need the two credential sets in [running.md](running.md#credentials). Remaining live
-scope is breadth, not correctness: only the 2-bit counter has been run live end to end;
-the medium designs (FSM, ALU) are proven offline but not yet live.
+and need the two credential sets in [running.md](running.md#credentials).
+
+### FSM breadth — live-confirmed green (run `15d3dd354b17`, 2026-06-08)
+
+The traffic-light FSM now passes **NL → Verilog → cocotb PASS live**, the second design
+class after the counter. The first FSM run (`9a77ce279bfb`) died `partial` and exposed
+three independent, previously-masked bugs — all fixed deterministically, regression-tested
+in `tests/test_fsm_reset_clock_repro.py`, and confirmed on the re-run:
+
+- **RC1 — active-low reset polarity dropped in codegen.** `SpecSummary.reset_active_low`
+  was read at Stage 1 but never threaded into the reverse bridge or Compiler 2, which
+  hardcoded active-high (`IF reset = 1` / `if (reset)`). Now threaded (default active-high)
+  so an active-low `rst_n` emits `if (!rst_n)`. *Proven offline + unit-tested; the live
+  re-run happened to choose active-high `rst`, so RC1's active-low branch is not yet
+  live-exercised.*
+- **RC2 — Agent 1 modelled `clk` as a toggling vector input.** The cocotb generator owns
+  the clock and ticks once per vector, so toggled-`clk` vectors assumed half-rate
+  advancement the harness never produces. Agent 1's prompt now carries a one-tick-per-vector
+  clock contract; the generator no longer drives `clk` per-vector. *Confirmed live: the
+  re-run emitted clean `clk:1`-constant immediate-advance vectors.*
+- **RC3 — the refinement critic false-rejected the `Initialization` reset action.** A
+  synchronous reset forcing state to its declared init values is a sanctioned refinement;
+  `pass6_checker` now carves it out while keeping every genuine check. *Confirmed live: the
+  critic ACCEPTED and the run reached `success`.*
+
+The re-run refined in **4 clean, replayable steps** (`Initialization` + `Iteration×3`,
+contiguous hashes, zero junk `IntroduceVariable`s) — the bounded-action-space thesis holds
+on a third NL prompt.
+
+Remaining live scope: the **multi-op ALU** is proven offline but not yet run live, and
+**RC1's active-low path** awaits a live active-low design to confirm.
+
+### Deferred — refinement-chain replay on the cocotb-revise path
+
+When `run_stage3_revise_cocotb` re-enters Stage 3 with the same `run_id`, the engine
+appends a fresh chain onto the stale prefix instead of truncating (as the backtrack path
+correctly does), yielding a non-replayable `refinement_chain.json` (observed in the failed
+`9a77ce279bfb`). Deferred: the fix touches the engine/revise replay contract and risks
+destabilising backtrack's golden replay; it does not fire on the happy path (a first-run
+pass never invokes revise).
 
 ---
 
