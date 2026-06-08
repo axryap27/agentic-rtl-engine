@@ -190,14 +190,57 @@ def _make_tlc_gate(module_name: str):
     return _gate
 
 
-def _make_pass_pick(pass_system_prompt: str):
-    """Return a pass-specific pick_rule callable."""
+def _log_pick_decision(
+    run_id: str | None,
+    pass_name: str | None,
+    applicable_rules: list[dict],
+    choice: dict,
+) -> None:
+    """Append one pick_rule decision to refinement_decisions.jsonl (best-effort).
+
+    The committed refinement_chain.json records only SUCCESSFUL applies; it does
+    NOT show what each pass offered, what Agent 3 chose on calls the engine later
+    rejected (invalid name, already-excluded, or TLC-gated), or which pass a step
+    came from. This incremental, append-as-you-go log captures all of that, so a
+    single metered live run yields a COMPLETE refinement trace — a stall is then
+    debuggable offline without burning another run. Never raises: a logging
+    failure must not break a pipeline run.
+    """
+    if not run_id:
+        return
+    try:
+        path = Path("artifacts") / run_id / "refinement_decisions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "pass": pass_name,
+            "offered": [r.get("name") for r in applicable_rules],
+            "chosen": choice.get("rule_name"),
+            "params": choice.get("params"),
+        }
+        with path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+def _make_pass_pick(pass_system_prompt: str, *, run_id: str | None = None,
+                    pass_name: str | None = None):
+    """Return a pass-specific pick_rule callable.
+
+    When run_id is given, every decision is appended to refinement_decisions.jsonl
+    (best-effort) so a mid-run stall still leaves a full trace of what this pass
+    offered and chose — including picks the engine later rejects.
+    """
     def _pick(applicable_rules: list[dict], s: dict) -> dict:
         if not _AGENT3_AVAILABLE:
             if applicable_rules:
-                return {"rule_name": applicable_rules[0]["name"], "params": {}}
+                choice = {"rule_name": applicable_rules[0]["name"], "params": {}}
+                _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+                return choice
             raise RuntimeError("No applicable rules and Agent 3 unavailable")
-        return _agent3.pick_rule(applicable_rules, s, system_prompt=pass_system_prompt)
+        choice = _agent3.pick_rule(applicable_rules, s, system_prompt=pass_system_prompt)
+        _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+        return choice
     return _pick
 
 
@@ -245,14 +288,19 @@ def _run_refinement_critic(
         return None
 
 
-def _make_pick_rule_callable(system_prompt: str | None = None):
+def _make_pick_rule_callable(system_prompt: str | None = None, *,
+                             run_id: str | None = None, pass_name: str = "catchall"):
     """Return the default (catch-all) pick_rule callable, optionally with a custom prompt."""
     def pick_rule(applicable_rules: list[dict], spec: dict) -> dict:
         if not _AGENT3_AVAILABLE:
             if applicable_rules:
-                return {"rule_name": applicable_rules[0]["name"], "params": {}}
+                choice = {"rule_name": applicable_rules[0]["name"], "params": {}}
+                _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+                return choice
             raise RuntimeError("No applicable rules and Agent 3 unavailable")
-        return _agent3.pick_rule(applicable_rules, spec, system_prompt=system_prompt)
+        choice = _agent3.pick_rule(applicable_rules, spec, system_prompt=system_prompt)
+        _log_pick_decision(run_id, pass_name, applicable_rules, choice)
+        return choice
     return pick_rule
 
 
@@ -390,7 +438,10 @@ def _run_stage3_from_spec(
                     try:
                         current_spec = _engine_run(
                             current_spec,
-                            _make_pass_pick(pass_cfg["system"]),
+                            _make_pass_pick(
+                                pass_cfg["system"],
+                                run_id=run_id, pass_name=pass_cfg["name"],
+                            ),
                             run_id=run_id,
                             tlc_check=tlc_gate,
                             allowed_rule_names=allowed,
@@ -402,7 +453,7 @@ def _run_stage3_from_spec(
 
             current_spec = _engine_run(
                 current_spec,
-                _make_pick_rule_callable(),
+                _make_pick_rule_callable(run_id=run_id, pass_name="catchall"),
                 run_id=run_id,
                 tlc_check=tlc_gate,
                 max_steps=_CATCHALL_MAX_STEPS,
@@ -703,7 +754,9 @@ Try different rule parameters — focus on reset values, clock domains, and
 update expressions that differ from the choices that led to the failure.
 """
 
-    backtrack_pick = _make_pick_rule_callable(system_prompt=backtrack_system)
+    backtrack_pick = _make_pick_rule_callable(
+        system_prompt=backtrack_system, run_id=run_id, pass_name="backtrack",
+    )
 
     # Write the truncated chain to disk before running the engine.
     # The engine will overwrite refinement_chain.json with the new steps

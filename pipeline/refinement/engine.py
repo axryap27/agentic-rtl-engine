@@ -342,10 +342,24 @@ def run(
 
     while not termination_check(spec):
         if total_steps >= max_steps:
+            # Report the ACTUAL cap (the max_steps PARAMETER), not the module
+            # default — Stage 3 passes a small per-pass cap, so printing the 200
+            # default here misattributed every capped stall as a 200-step blow-up.
+            # Include the rules still firing (but never terminating) and the tail
+            # of the chain so a stall is debuggable from the artifact alone,
+            # without a re-run.
+            applicable_now = [
+                r.__class__.__name__ for r in RULE_REGISTRY
+                if r.is_applicable(spec)
+                and (allowed_rule_names is None
+                     or r.__class__.__name__ in allowed_rule_names)
+            ]
             raise RefinementStall(
-                f"Refinement exceeded {MAX_STEPS} steps without reaching "
+                f"Refinement exceeded {max_steps} steps without reaching "
                 f"RTL-style. This likely indicates a pick_rule that cycles. "
-                f"Chain length: {len(chain)}."
+                f"Chain length: {len(chain)}. "
+                f"Rules still applicable at stall: {applicable_now}. "
+                f"Last picks: {[s['rule_name'] for s in chain[-8:]]}."
             )
         total_steps += 1
 
