@@ -266,10 +266,34 @@ def _input_port_widths(artifact_dir: Path) -> dict[str, int]:
         return {}
 
 
+def _reset_port(artifact_dir: Path) -> str:
+    """Best-effort reset-port name for this design from 01_summary.json (FIX 1).
+
+    The cocotb generator drives ``dut.<SpecSummary.reset_port>``; the emitted
+    Verilog must declare a reset input of the SAME name or the reset floats and
+    the design never resets (the 2-bit counter bug: generator drove `dut.rst`
+    while Compiler 2 emitted a `reset` port). We thread this name into BOTH the
+    reverse bridge and Compiler 2.
+
+    Defaults to "reset" when the summary is missing, unreadable, not a success,
+    or has no reset_port — preserving the prior hardcoded behaviour for designs
+    that name their reset "reset". Mirrors `_input_port_widths`' fail-soft style.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        if data.get("status") != "success":
+            return "reset"
+        summary = SpecSummary.model_validate(data)
+        return summary.reset_port or "reset"
+    except Exception:
+        return "reset"
+
+
 def _run_stage3_from_spec(
     state: PipelineState,
     spec: FormalSpec,
     port_widths: dict[str, int] | None = None,
+    reset_port: str = "reset",
 ) -> PipelineState:
     """
     Run the TLC loop, refinement engine, and Compiler 2 for a given FormalSpec.
@@ -281,6 +305,9 @@ def _run_stage3_from_spec(
     port_widths: {name: width} hints (from the SpecSummary input ports) used to
     size free inputs in the reverse bridge (D2). None → bridge falls back to
     register-feed inference / width-1.
+    reset_port: the design's reset input name (FIX 1), threaded into BOTH the
+    reverse bridge and Compiler 2 so the emitted reset port matches the cocotb
+    generator's `dut.<reset_port>`. Defaults to "reset".
     """
     run_id = state["run_id"]
     artifact_dir = Path("artifacts") / run_id
@@ -375,7 +402,8 @@ def _run_stage3_from_spec(
                 write_artifact(formal_path, formal_artifact)
 
             rtl_tla_source = engine_spec_to_rtl_tla(
-                current_spec, spec.module_name, port_widths=port_widths
+                current_spec, spec.module_name,
+                port_widths=port_widths, reset_port=reset_port,
             )
             refined_engine_spec = current_spec
             refinement_ok = True
@@ -426,7 +454,7 @@ def _run_stage3_from_spec(
         return state
 
     try:
-        compiler = RTLTLACompiler(rtl_tla_source)
+        compiler = RTLTLACompiler(rtl_tla_source, reset_port=reset_port)
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
@@ -500,7 +528,12 @@ def run_stage3(state: PipelineState) -> PipelineState:
     # D2: pass the declared input-port widths so multi-bit free inputs aren't
     # truncated to 1 bit by the reverse bridge.
     port_widths = {p.name: p.width for p in summary.ports if p.direction == "input"}
-    return _run_stage3_from_spec(state, spec, port_widths=port_widths)
+    # FIX 1: thread the design's actual reset-port name so the emitted reset
+    # port matches the cocotb generator's `dut.<reset_port>`.
+    reset_port = summary.reset_port or "reset"
+    return _run_stage3_from_spec(
+        state, spec, port_widths=port_widths, reset_port=reset_port,
+    )
 
 
 def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
@@ -560,7 +593,9 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
     # Hand off to the shared pipeline — BUG-2 FIX: we pass the revised spec
     # directly instead of calling run_stage3() which would re-generate from scratch.
     return _run_stage3_from_spec(
-        state, revised, port_widths=_input_port_widths(artifact_dir)
+        state, revised,
+        port_widths=_input_port_widths(artifact_dir),
+        reset_port=_reset_port(artifact_dir),
     )
 
 
@@ -677,6 +712,7 @@ update expressions that differ from the choices that led to the failure.
         rtl_tla_source = engine_spec_to_rtl_tla(
             final_spec, spec.module_name,
             port_widths=_input_port_widths(artifact_dir),
+            reset_port=_reset_port(artifact_dir),
         )
     except RefinementStall as exc:
         _write_error(rtl_path, f"Backtrack refinement stalled: {exc}")
@@ -687,7 +723,7 @@ update expressions that differ from the choices that led to the failure.
 
     # Compiler 2 → Verilog-2001
     try:
-        compiler = RTLTLACompiler(rtl_tla_source)
+        compiler = RTLTLACompiler(rtl_tla_source, reset_port=_reset_port(artifact_dir))
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)

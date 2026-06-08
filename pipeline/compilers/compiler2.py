@@ -246,7 +246,9 @@ def verify_banlist(verilog: str) -> None:
 # Public entry point (pinned signature)
 # ---------------------------------------------------------------------------
 
-def compile_tla_to_verilog(tla_source: str, module_name: str) -> str:
+def compile_tla_to_verilog(
+    tla_source: str, module_name: str, reset_port: str = "reset",
+) -> str:
     """
     Compiler 2 public entry point.
 
@@ -257,6 +259,10 @@ def compile_tla_to_verilog(tla_source: str, module_name: str) -> str:
     Args:
         tla_source:  RTL-style TLA+ text (output of Refinement Engine).
         module_name: Verilog module name for the emitted module.
+        reset_port:  the design's reset input name (FIX 1). Must match the
+            reset_port passed to ``engine_spec_to_rtl_tla`` so the
+            ``IF {reset_port} = 1 THEN`` reset block is recognised and the reset
+            port is emitted under the correct name. Defaults to "reset".
 
     Returns:
         Synthesizable Verilog-2001 source as a string.
@@ -264,7 +270,7 @@ def compile_tla_to_verilog(tla_source: str, module_name: str) -> str:
     Raises:
         BanlistViolation: if emitted code contains a banned construct.
     """
-    verilog = RTLTLACompiler(tla_source).compile(module_name)
+    verilog = RTLTLACompiler(tla_source, reset_port=reset_port).compile(module_name)
     verify_banlist(verilog)
     return verilog
 
@@ -386,9 +392,6 @@ Spec == Init /\ [][Next]_hw_vars
 class RTLTLACompiler:
     """Compiles RTL-style TLA+ to synthesizable Verilog-2001."""
 
-    # Always emitted as module input ports
-    _FIXED_INPUTS = frozenset(["clk", "reset"])
-
     # Variables whose names start with these prefixes are internal registers,
     # never exposed as ports regardless of which blocks drive them.
     _INTERNAL_PREFIXES = ("r_",)
@@ -396,8 +399,15 @@ class RTLTLACompiler:
     # Verification-only variable prefix — dropped entirely from Verilog output
     _VERIFY_VAR = re.compile(r"^hw_")
 
-    def __init__(self, tla_code: str):
+    def __init__(self, tla_code: str, reset_port: str = "reset"):
         self.tla_code = tla_code
+        # FIX 1: the reset port name is configurable so it matches the cocotb
+        # generator's `dut.<reset_port>`. clk + this reset name are the fixed
+        # input ports (formerly the class-level frozenset _FIXED_INPUTS). Made
+        # an instance value so the reset name flows into every classification,
+        # range, port-decl, and undeclared-input check. Defaults to "reset".
+        self.reset_port = reset_port
+        self._FIXED_INPUTS = frozenset(["clk", reset_port])
         self.variables: list[str] = []
         # Per-variable bit width, captured from the "\* width: N" comment the
         # bridge attaches to each VARIABLES entry (BUG-17). Defaults to 1.
@@ -546,14 +556,51 @@ class RTLTLACompiler:
         if expr.startswith("Append(") or expr in ("<< >>", "<<>>"):
             return "/* FORMAL_ONLY */"
         expr = re.sub(r"<<\s*>>", "/* FORMAL_ONLY */", expr)
+        # FIX 3: defensive word-form boolean operators in case any leak past the
+        # bridge's _translate_bool_words (e.g. hand-written TLA+ fed straight to
+        # Compiler 2). Word-boundary anchored so identifiers are untouched. These
+        # run BEFORE the symbolic passes so a translated `&&`/`||`/`!` is final.
+        expr = re.sub(r"\bAND\b", "&&", expr)
+        expr = re.sub(r"\bOR\b", "||", expr)
+        expr = re.sub(r"\bNOT\b", "!", expr)
         # Logical operators
         expr = re.sub(r"/\\", "&&", expr)
         expr = re.sub(r"\\/", "||", expr)
+        # TLA+ boolean NOT (~) → Verilog logical NOT (!). Must run before the
+        # `=`→`==` pass; `~` never collides with the relational operators.
+        expr = expr.replace("~", "!")
         # Not-equal before equal
         expr = expr.replace("/=", "!=")
         # = → == (skip already-translated == != <= >=)
         expr = re.sub(r"(?<![!<>=])=(?!=)", "==", expr)
         return expr
+
+    @staticmethod
+    def _strip_enclosing_parens(expr: str) -> Optional[str]:
+        """If *expr* is fully wrapped in one matching paren pair, return the inner
+        text; otherwise None.
+
+        "Fully wrapped" means the leading ``(`` and trailing ``)`` are matched to
+        each other (depth returns to 0 only at the very end). This lets
+        translate_expr recurse into a parenthesised conditional such as
+        ``(IF c THEN a ELSE b)`` — emitted by the bridge when a guarded clocked
+        action's expression is itself a conditional placed in a THEN branch
+        (FIX 2). Without this, the leading ``(`` hides the ``IF`` from the
+        IF-splitter and the keyword leaks past the translator. Pure.
+        """
+        if len(expr) < 2 or expr[0] != "(" or expr[-1] != ")":
+            return None
+        depth = 0
+        for i, ch in enumerate(expr):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    # Closing paren for the leading '(' must be the final char,
+                    # else the parens are not fully enclosing (e.g. "(a)+(b)").
+                    return expr[1:-1] if i == len(expr) - 1 else None
+        return None
 
     def translate_expr(self, expr: str) -> str:
         """Recursively translate a TLA+ expression to Verilog."""
@@ -566,6 +613,14 @@ class RTLTLACompiler:
                 t = self.translate_expr(then_val)
                 e = self.translate_expr(else_val)
                 return f"({c}) ? ({t}) : ({e})"
+        # A parenthesised conditional `(IF ... )` does not start with `IF `, so the
+        # branch above misses it. Strip one fully-enclosing paren pair and recurse
+        # when the inner is itself a conditional, preserving the grouping with an
+        # outer paren around the resulting ternary (FIX 2). Non-conditional
+        # parenthesised exprs are left to _translate_basic unchanged (no regression).
+        inner = self._strip_enclosing_parens(expr)
+        if inner is not None and inner.strip().startswith("IF "):
+            return f"({self.translate_expr(inner)})"
         return self._translate_basic(expr)
 
     # ------------------------------------------------------------------
@@ -632,14 +687,21 @@ class RTLTLACompiler:
         """
         Split the UpdatePipeline block into (reset_section, else_section).
 
-        Finds the outer  IF reset = 1 THEN ... ELSE ...  by looking for a line
-        whose sole content is 'ELSE' (the standalone ELSE line that follows the
-        reset conjuncts at the same indentation level as the IF keyword).
+        Finds the outer  IF {reset_port} = 1 THEN ... ELSE ...  by looking for a
+        line whose sole content is 'ELSE' (the standalone ELSE line that follows
+        the reset conjuncts at the same indentation level as the IF keyword).
+        The reset signal name is configurable (FIX 1) so a design whose reset is
+        named e.g. `rst` is still recognised; mismatching it would leave the
+        reset IF untranslated and leak `IF`/`ELSE` keywords past the banlist.
         """
         lines = block.split("\n")
         in_then = False
         then_lines: list[str] = []
         else_lines: list[str] = []
+
+        reset_if_re = re.compile(
+            rf"/\\\s*IF\s+{re.escape(self.reset_port)}\s*"
+        )
 
         for line in lines:
             clean = re.sub(r"\\\*[^\n]*", "", line).rstrip()
@@ -647,7 +709,7 @@ class RTLTLACompiler:
             if not stripped:
                 continue
 
-            if not in_then and re.match(r"/\\\s*IF\s+reset\s*", stripped):
+            if not in_then and reset_if_re.match(stripped):
                 in_then = True
                 continue
 
@@ -797,8 +859,10 @@ class RTLTLACompiler:
         out.append("")
 
         # --- Module header with full inferred port list ---
+        # FIX 1: the reset port is emitted under its configured name so it binds
+        # to the cocotb generator's `dut.<reset_port>` (default "reset").
         port_decls: list[str] = (
-            ["    input  clk", "    input  reset"]
+            ["    input  clk", f"    input  {self.reset_port}"]
             + [f"    input  {self._range(v)}{v}" for v in input_ports]
             + [f"    output {self._range(v)}{v}" for v in output_wires]
             + [f"    output reg {self._range(v)}{v}" for v in output_regs]
@@ -826,7 +890,7 @@ class RTLTLACompiler:
             out.append("    // Clocked pipeline evolution")
             out.append("    always @(posedge clk) begin")
             if reset_assigns:
-                out.append("        if (reset) begin")
+                out.append(f"        if ({self.reset_port}) begin")
                 for var, expr in reset_assigns:
                     out.append(f"            {var} <= {self.translate_expr(expr)};")
                 out.append("        end else begin")

@@ -66,6 +66,51 @@ _RESERVED_IDENTIFIERS: frozenset[str] = frozenset({
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*'?")
 
 
+# ---------------------------------------------------------------------------
+# Boolean word-operator translation (FIX 3)
+# ---------------------------------------------------------------------------
+# Agent 3 sometimes writes English boolean operators (AND/OR/NOT) in transition
+# guards and update expressions. The Compiler-1/TLC path translates these (see
+# compiler1.translate_expr), but the RTL path goes FormalSpec -> bridge ->
+# Compiler 2, which only understands symbolic operators (/\ \/ ~). If we leave
+# the words in, Compiler 2 never translates them AND the free-input scanner
+# excludes AND/OR/NOT as reserved but would otherwise pass guard structure
+# through wrongly. We normalise to symbolic form here, at the FormalSpec ->
+# engine-spec boundary, so the engine spec is symbolic and every downstream
+# RTL-path consumer (Compiler 2 + the free-input scanner) sees operators.
+#
+# This mirrors compiler1._EXPR_SUBS (AND -> /\, OR -> \/, NOT -> ~) and is
+# idempotent: an already-symbolic expression has no AND/OR/NOT word tokens, so
+# applying it again is a no-op. Existing engine-spec-built tests (which write
+# symbolic guards directly) are therefore unaffected.
+# NOTE: these are re.sub REPLACEMENT strings, where a backslash is itself
+# special. To emit a single literal backslash we must write "\\\\" in source
+# (two backslashes survive to the replacement template, which yields one literal
+# backslash). This mirrors compiler1._EXPR_SUBS exactly.
+_BOOL_WORD_SUBS: list[tuple["re.Pattern[str]", str]] = [
+    (re.compile(r"\bAND\b"), "/\\\\"),   # AND -> /\
+    (re.compile(r"\bOR\b"), "\\\\/"),    # OR  -> \/
+    (re.compile(r"\bNOT\b"), "~"),       # NOT -> ~
+]
+
+
+def _translate_bool_words(expr: str) -> str:
+    """Replace English boolean operators AND/OR/NOT with TLA+ symbolic forms.
+
+    Word-boundary anchored so identifiers containing these substrings (e.g.
+    ``ANDgate``, ``commander``) are not touched. Idempotent on already-symbolic
+    input. Pure. Comparison WORDS (``equals``/``less than``) are intentionally
+    NOT handled here — they are ambiguous to parse deterministically and are
+    instead prevented at the source by the Agent-3 prompt (FIX 3).
+    """
+    if not expr:
+        return expr
+    result = expr
+    for pattern, replacement in _BOOL_WORD_SUBS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
 def _scan_identifiers(expr: str) -> set[str]:
     """Return the set of (unprimed) identifiers appearing in a TLA+ expression.
 
@@ -130,7 +175,13 @@ def _nested_if(clauses: list[tuple[str, str]], default: str) -> str:
         return default
     out = default
     for guard, value in reversed(clauses):
-        out = f"IF {guard} THEN {value} ELSE {out}"
+        # A nested conditional in the THEN position would otherwise confuse
+        # Compiler 2's depth-0 IF-splitter (its first ` ELSE ` would be the
+        # INNER else). Parenthesise a conditional THEN value so the splitter
+        # treats it atomically; Compiler 2's translate_expr strips the enclosing
+        # paren and recurses (FIX 2). A leaf value is left bare (no regression).
+        then_val = f"({value})" if value.strip().startswith("IF ") else value
+        out = f"IF {guard} THEN {then_val} ELSE {out}"
     return out
 
 
@@ -387,11 +438,19 @@ def _negate_guard(guard: str) -> str | None:
 def _clocked_update_exprs(action: dict) -> list[tuple[str, str]]:
     """(variable, rhs) pairs for a clocked action, with its guard woven in (D5).
 
+    SUPERSEDED by `_compose_clocked_actions` (FIX 2), which composes guards
+    ACROSS all clocked actions writing a variable (not just the single action's
+    own guard) and emits the equivalent POSITIVE-guard form. The emit path no
+    longer calls this; it is retained only for reference / direct unit use.
+    `_negate_guard` and `_REL_NEG` exist solely to support this function.
+
     Emits ``IF <not guard> THEN <var> ELSE <update>`` — the negated-guard form,
     which keeps every THEN branch a simple leaf so Compiler 2's expression
     translator renders a clean nested ternary. (A guard in THEN position with a
     nested IF in it leaks untranslated IF/THEN/ELSE keywords through Compiler 2's
-    structural splitter; the negated form sidesteps that.)
+    structural splitter; the negated form sidesteps that. FIX 2 instead
+    parenthesises a conditional THEN value and teaches translate_expr to strip
+    the enclosing paren and recurse.)
 
     When the guard is trivial or cannot be safely negated, the update is emitted
     ungated — identical to the prior behaviour, so no regression. The reset
@@ -402,6 +461,91 @@ def _clocked_update_exprs(action: dict) -> list[tuple[str, str]]:
     if neg is None:
         return pairs
     return [(var, f"IF {neg} THEN {var} ELSE {expr}") for var, expr in pairs]
+
+
+# ---------------------------------------------------------------------------
+# Cross-action clocked composition (FIX 2)
+# ---------------------------------------------------------------------------
+# Agent 3 frequently models one register's evolution as SEVERAL clocked actions
+# guarded by mutually-exclusive conditions (e.g. a counter's Increment
+# `count < 3 -> count + 1` and Wrap `count = 3 -> 0`). Each action is a separate
+# entry in clocked_actions, and emitting each action's updates as its own flat
+# `count' = ...` conjunct in the ELSE branch produces TWO drivers for `count`:
+#
+#     count <= count + 1;
+#     count <= 0;          // last nonblocking assign wins -> count is always 0
+#
+# `_clocked_update_exprs` (D5) only weaves a SINGLE action's own guard in; it
+# does not see the other actions writing the same variable. We must instead
+# compose ACROSS the clocked actions into ONE guarded next-state per variable.
+#
+# This SUBSUMES the per-action D5 loop for the common cases:
+#   * one clocked action, guard TRUE  -> default = its expr, no IF (no change)
+#   * one clocked action, guard `en=1` -> IF en=1 THEN expr ELSE var
+#     (positive-guard form; equivalent to the old negated `IF en/=1 THEN var
+#     ELSE expr`, but expressed directly)
+#   * many clocked actions on one var  -> nested IF in priority order
+
+
+def _compose_clocked_actions(
+    clocked_actions: list[dict],
+) -> list[tuple[str, str]]:
+    """Compose every clocked action into one guarded next-state RHS per variable.
+
+    For each assigned variable (first-seen order across all actions), collect
+    each clocked action's (guard, expr) for that variable in ACTION order. The
+    composed RHS is a nested conditional:
+
+        IF g1 THEN e1 ELSE IF g2 THEN e2 ELSE ... ELSE <default>
+
+    where the clauses are the NON-``TRUE``-guarded (guard, expr) pairs in
+    priority order, and ``<default>`` is the first ``TRUE``-guarded action's
+    expression for that variable (an unconditional write), or — if no action
+    writes it unconditionally — the variable itself (register hold). This means:
+
+      * A single TRUE-guarded action collapses to ``default = expr`` with NO IF
+        (identical to the old single-action emit — no regression).
+      * A single non-TRUE-guarded action (the D5 ``en = 1`` case) yields
+        ``IF en = 1 THEN expr ELSE var`` — the positive-guard form, equivalent
+        to the old negated-guard ``IF en /= 1 THEN var ELSE expr``.
+      * Multiple mutually-exclusive actions compose into one nested-IF, so there
+        is exactly ONE driver per variable (FIX 2).
+
+    Positive-guard nested-IFs nest in the ELSE chain and keep every THEN branch
+    a leaf, which is exactly what Compiler 2's _split_if_then_else handles.
+    Branch-/step-composed (Alternation / SequentialComposition) RHS is honoured
+    via `_action_update_exprs`. Pure and deterministic.
+    """
+    # First-seen variable order across all clocked actions' composed updates.
+    var_order = _ordered_assigned_vars(
+        [
+            [{"variable": v} for v, _ in _action_update_exprs(a)]
+            for a in clocked_actions
+        ]
+    )
+
+    # Index each action's composed (var -> expr) once for lookup.
+    per_action: list[tuple[str, dict[str, str]]] = []
+    for action in clocked_actions:
+        guard = (action.get("guard", "TRUE") or "TRUE").strip() or "TRUE"
+        per_action.append((guard, dict(_action_update_exprs(action))))
+
+    result: list[tuple[str, str]] = []
+    for var in var_order:
+        clauses: list[tuple[str, str]] = []
+        default: str | None = None
+        for guard, updates in per_action:
+            if var not in updates:
+                continue
+            expr = updates[var]
+            if guard == "TRUE":
+                # First unconditional write becomes the fall-through default.
+                if default is None:
+                    default = expr
+            else:
+                clauses.append((guard, expr))
+        result.append((var, _nested_if(clauses, default if default is not None else var)))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +574,17 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
         for name, var in spec.variables.items()
     ]
 
+    # FIX 3: normalise English boolean operators (AND/OR/NOT) to TLA+ symbolic
+    # form in every guard and update expression, so the RTL path (bridge ->
+    # Compiler 2) and the free-input scanner see operators, not words. The
+    # Compiler-1/TLC path already does its own translation, so this is purely
+    # for the engine-spec / RTL branch. Idempotent on symbolic input.
     actions = [
         {
             "name": t.label,
-            "guard": t.condition,
+            "guard": _translate_bool_words(t.condition),
             "updates": [
-                {"variable": k, "expression": v}
+                {"variable": k, "expression": _translate_bool_words(v)}
                 for k, v in t.updates.items()
             ],
             "is_rtl_style": False,
@@ -464,7 +613,10 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
 # ---------------------------------------------------------------------------
 
 def engine_spec_to_rtl_tla(
-    engine_spec: dict, module_name: str, port_widths: dict | None = None,
+    engine_spec: dict,
+    module_name: str,
+    port_widths: dict | None = None,
+    reset_port: str = "reset",
 ) -> str:
     """
     Convert a post-refinement engine spec dict to RTL-style TLA+ text.
@@ -479,11 +631,27 @@ def engine_spec_to_rtl_tla(
         port_widths: optional {name: width} hints for free inputs, sourced from
             the Stage-1 SpecSummary ports. A free input listed here is sized to
             the declared width instead of inferred/defaulted (D2).
+        reset_port: the design's actual reset input name (FIX 1). The cocotb
+            generator drives ``dut.<reset_port>``; Compiler 2 must emit a port of
+            the same name or the reset floats. Defaults to "reset" so existing
+            specs that name their reset "reset" are unchanged. This name is used
+            for the ``(reset_port, 1)`` VARIABLES entry and the
+            ``IF {reset_port} = 1 THEN`` reset condition in UpdatePipeline; the
+            matching Compiler-2 instance must be constructed with the same
+            reset_port.
 
     Returns:
         TLA+ source string ready for Compiler 2.
     """
     variables = engine_spec.get("variables", [])
+    # FIX 1: Agent 3 sometimes models the reset (or clock) as a STATE variable,
+    # which would otherwise be emitted as a bogus `output reg <reset>` / `output
+    # reg clk`. The reset and clock are PORTS, not registers — drop any engine
+    # variable whose name collides with the reset port or "clk" so the canonical
+    # port declarations below are the only source of those names.
+    variables = [
+        v for v in variables if v.get("name") not in (reset_port, "clk")
+    ]
     actions = engine_spec.get("actions", [])
     reset_action_name = engine_spec.get("reset_action")
 
@@ -503,7 +671,7 @@ def engine_spec_to_rtl_tla(
     # are always single-bit. Missing/zero width defaults to 1.
     sized_vars = [
         (v["name"], int(v.get("width") or 1)) for v in variables
-    ] + [("clk", 1), ("reset", 1)]
+    ] + [("clk", 1), (reset_port, 1)]
 
     # Free inputs (BUG-18): identifiers used in guards/update expressions that
     # are NOT declared variables, clk/reset, or TLA+ keywords. Without this they
@@ -559,20 +727,23 @@ def engine_spec_to_rtl_tla(
     lines.append("    /\\ clk' = 1 - clk")
 
     if reset_action:
-        lines.append("    /\\ IF reset = 1 THEN")
+        lines.append(f"    /\\ IF {reset_port} = 1 THEN")
         for var, expr in _action_update_exprs(reset_action):
             lines.append(f"          /\\ {var}' = {expr}")
         lines.append("       ELSE")
-        for action in clocked_actions:
-            # _clocked_update_exprs weaves a non-trivial action guard into the
-            # next-state (D5) so e.g. `en = 1` actually gates the update.
-            for var, expr in _clocked_update_exprs(action):
-                lines.append(f"          /\\ {var}' = {expr}")
+        # FIX 2: compose ACROSS all clocked actions into one guarded next-state
+        # per variable, so several actions writing the same register (e.g.
+        # Increment + Wrap on `count`) become a single nested-IF driver instead
+        # of colliding nonblocking assigns (last-wins). This subsumes the old
+        # per-action D5 guard-weaving for the single-action cases.
+        for var, expr in _compose_clocked_actions(clocked_actions):
+            lines.append(f"          /\\ {var}' = {expr}")
     else:
-        # No reset action yet — emit clocked updates flat (partial refinement)
-        for action in clocked_actions:
-            for var, expr in _clocked_update_exprs(action):
-                lines.append(f"    /\\ {var}' = {expr}")
+        # No reset action yet — emit composed clocked updates flat (partial
+        # refinement). Still composed across actions (FIX 2) so a multi-action
+        # register does not double-drive even without a reset branch.
+        for var, expr in _compose_clocked_actions(clocked_actions):
+            lines.append(f"    /\\ {var}' = {expr}")
 
     lines.append("")
 
