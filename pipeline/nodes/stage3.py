@@ -46,6 +46,16 @@ from pipeline.schemas.tla_schema import FormalSpec
 MAX_TLC_RETRIES = 3
 BACKTRACK_STEPS = 3   # number of refinement steps to roll back on a refinement fault
 
+# Token/cost cap on the LIVE refinement loop — the number of pick_rule (Agent-3,
+# LLM) calls each engine pass may make before it stalls. A real design needs only a
+# handful of rule applications per pass; the previous caps (50/30/30/20/20 per
+# structured pass, plus the engine's 200-step default on the catch-all and backtrack
+# passes) let a cycling live picker burn hundreds of Agent-3 calls — and hundreds of
+# thousands of input tokens — on a single run. A stalled pass just logs a
+# refinement_warning and the run continues, so keeping these small is safe.
+_PASS_MAX_STEPS = 8        # per structured pass (was 50/30/30/20/20)
+_CATCHALL_MAX_STEPS = 12   # catch-all + backtrack passes (was the engine default, 200)
+
 try:
     from pipeline.agents import agent3 as _agent3
     _AGENT3_AVAILABLE = True
@@ -95,25 +105,25 @@ try:
             "name": "pass1_fsm",
             "allowed": {"SequentialComposition", "Iteration"},
             "system": pass1_fsm.SYSTEM,
-            "max_steps": 50,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass2_handshake",
             "allowed": {"Alternation", "IntroduceVariable"},
             "system": pass2_handshake.SYSTEM,
-            "max_steps": 30,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass3_datapath",
             "allowed": {"Assignment", "IntroduceVariable"},
             "system": pass3_datapath.SYSTEM,
-            "max_steps": 30,
+            "max_steps": _PASS_MAX_STEPS,
         },
         {
             "name": "pass4_reset",
             "allowed": {"Initialization"},
             "system": pass4_reset.SYSTEM,
-            "max_steps": 20,
+            "max_steps": _PASS_MAX_STEPS,
         },
         # Pass 5 — mapping-completeness audit. May only supply a missing
         # mapping symbol (IntroduceVariable); no behavioral rewrite permitted.
@@ -121,7 +131,7 @@ try:
             "name": "pass5_mapping",
             "allowed": {"IntroduceVariable"},
             "system": pass5_mapping.SYSTEM,
-            "max_steps": 20,
+            "max_steps": _PASS_MAX_STEPS,
         },
         # NOTE: pass6_checker is intentionally NOT an engine pass. It is a pure
         # read-only refinement-correctness critic with no rule to "pick", so it
@@ -395,6 +405,7 @@ def _run_stage3_from_spec(
                 _make_pick_rule_callable(),
                 run_id=run_id,
                 tlc_check=tlc_gate,
+                max_steps=_CATCHALL_MAX_STEPS,
             )
 
             if refinement_warnings:
@@ -708,6 +719,7 @@ update expressions that differ from the choices that led to the failure.
             backtrack_pick,
             run_id=run_id,
             tlc_check=tlc_gate,
+            max_steps=_CATCHALL_MAX_STEPS,
         )
         rtl_tla_source = engine_spec_to_rtl_tla(
             final_spec, spec.module_name,
