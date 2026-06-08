@@ -74,8 +74,10 @@ committed within one run. `_PASS_CONFIGS` and the pass-template files are **reta
 stays green untouched. `_CATCHALL_MAX_STEPS` was raised 12 → 16 for sole-driver headroom;
 idempotency + the no-op / 3-strike→backtrack guards make a larger cap cycle-free.
 Regression: `tests/test_catchall_sole_driver.py` pins that the catch-all-only chain
-replays cleanly with no duplicate `IntroduceVariable` names. The single confirming live
-`main.py` run remains the only open verification (it is metered).
+replays cleanly with no duplicate `IntroduceVariable` names. **Confirmed live:** run
+`885b9fc0a06b` refined the counter in exactly 3 clean steps (Initialization → Iteration →
+Iteration), the persisted chain replays cleanly, and cocotb PASSED — 3 `pick_rule` calls
+vs the old run's 26.
 
 The gated live-refinement-convergence test (`agentic_tests/test_refinement_convergence_live.py`)
 and the deterministic usage-ledger / diagnoser coverage (`tests/test_usage_ledger.py`,
@@ -92,19 +94,19 @@ and the deterministic usage-ledger / diagnoser coverage (`tests/test_usage_ledge
   `WeakenPrecondition`, `StrengthenPostcondition` are designed but not implemented (see
   [background.md](background.md)) — needed for designs beyond FSM+datapath.
 
-### Live full-pipeline run — one confirming run pending
+### Live full-pipeline run — CONFIRMED GREEN
 
-The mechanical path **and** Stage-3 convergence are now proven offline on the *real*
-captured Agent-3 spec. The one remaining live unknown is narrow: that the live picker,
-in the catch-all pass, drives a from-scratch clean spec all the way to `is_rtl_style`
-end to end (the convergence test already shows the live picker makes good
-Init/Assignment/Iteration choices). A single confirming `python3.11 main.py` is the
-final check — it needs the two credential sets in
-[running.md](running.md#credentials), is metered on the Agent-3 Anthropic key
-([budget cap](agents.md#budget-guard)), and is now far cheaper: the step caps plus the
-engine robustness bound a run to a handful of `pick_rule` calls. The per-pick decision
-log (`artifacts/<run_id>/refinement_decisions.jsonl`) records the full live trajectory
-for triage without a re-run.
+The full pipeline (NL → Agent 1 → Agent 3 → refinement → Compiler 2 → cocotb) reaches
+**cocotb PASS end to end on a real LLM** — first on the old 5-pass path (run
+`3f7e08d09b4b`), then, after the sole-driver change, on the catch-all-only path (run
+`885b9fc0a06b`) in **3 clean, replayable `pick_rule` calls**. The bounded-action-space
+thesis is demonstrated against a live model. The per-pick decision log
+(`artifacts/<run_id>/refinement_decisions.jsonl`) records the full live trajectory.
+
+Live runs are metered on the Agent-3 Anthropic key ([budget cap](agents.md#budget-guard))
+and need the two credential sets in [running.md](running.md#credentials). Remaining live
+scope is breadth, not correctness: only the 2-bit counter has been run live end to end;
+the medium designs (FSM, ALU) are proven offline but not yet live.
 
 ---
 
