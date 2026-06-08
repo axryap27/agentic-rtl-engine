@@ -122,6 +122,11 @@ def test_engine_survives_a_throwing_pick_rule():
     exception. The structured-pass wrapper in stage3 catches RefinementStall
     and continues to the next pass — so one bad response can't kill the run.
     """
+    # Isolation: clear any chain left by a prior (possibly interrupted) run.
+    # The engine concatenates a same-run_id committed prefix onto the on-disk
+    # chain (G13), so a stale file at this fixed path would skew the assertion.
+    shutil.rmtree(Path("artifacts/test_repro_throwing_picker"), ignore_errors=True)
+
     def always_throws(applicable_rules, spec):
         raise ValueError("simulated: Agent 3 returned a non-pick 'blocked' report")
 
@@ -144,6 +149,12 @@ def test_engine_does_not_spin_on_a_no_op_picker():
     A2 (no-op = strike), the engine excludes the no-op and backtracks; the chain
     never reaches the cap with identical steps.
     """
+    # Isolation: clear any chain left by a prior (possibly interrupted) run so the
+    # committed-prefix concatenation (G13) can't inflate the chain-length assertion
+    # below with stale steps. Without this, a leftover 4-step file makes this test
+    # spuriously fail on the next full-suite run.
+    shutil.rmtree(Path("artifacts/test_repro_noop_picker"), ignore_errors=True)
+
     def always_iterate_increment(applicable_rules, spec):
         return {"rule_name": "Iteration", "params": {"action_name": "Increment"}}
 
@@ -172,9 +183,16 @@ def _competent_picker(applicable_rules, spec, *, system_prompt=None):
     """An applicability-driven picker that mimics a competent LIVE Agent 3.
 
     It makes the two constructive picks a counter needs (establish reset, then
-    clock each counting action) and otherwise DECLINES by raising — exactly the
-    way live Agent 3 declined the handshake/mapping passes. The decline path
-    exercises B-fix-1 inside the real stage3 pass loop.
+    clock each counting action) and otherwise DECLINES by raising — historically
+    the way live Agent 3 declined the handshake/mapping passes.
+
+    NOTE: the structured passes are now gated off (stage3._RUN_STRUCTURED_PASSES),
+    so under the sole catch-all driver this picker never hits the decline branch
+    (the catch-all only ever offers constructive rules for the counter). The
+    decline path's engine-robustness coverage now lives in
+    test_engine_survives_a_throwing_pick_rule (direct engine test). This picker is
+    kept applicability-driven (not a monotonic counter) because the catch-all may
+    still call it more than the minimal number of times.
     """
     names = {r["name"] for r in applicable_rules}
     reset_action = spec.get("reset_action")
@@ -203,10 +221,10 @@ def _competent_picker(applicable_rules, spec, *, system_prompt=None):
 
 
 def test_full_stage3_converges_on_captured_counter(tmp_path, monkeypatch):
-    """NL→spec is fixed to the captured CLEAN spec; the competent-but-declining
-    picker drives the real stage3 (5 structured passes + catch-all). With the
-    three fixes the run must reach `success` with a correct 2-bit counter — the
-    exact scenario that produced a `partial` empty module before the fixes.
+    """NL→spec is fixed to the captured CLEAN spec; the competent picker drives
+    the real stage3 (catch-all sole driver). With the engine/rule fixes the run
+    must reach `success` with a correct 2-bit counter — the exact scenario that
+    produced a `partial` empty module before the fixes.
     """
     from pipeline.nodes import stage3
     from pipeline.agents import agent3

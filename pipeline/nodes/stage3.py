@@ -54,7 +54,51 @@ BACKTRACK_STEPS = 3   # number of refinement steps to roll back on a refinement 
 # thousands of input tokens — on a single run. A stalled pass just logs a
 # refinement_warning and the run continues, so keeping these small is safe.
 _PASS_MAX_STEPS = 8        # per structured pass (was 50/30/30/20/20)
-_CATCHALL_MAX_STEPS = 12   # catch-all + backtrack passes (was the engine default, 200)
+
+# --- Catch-all as the SOLE refinement driver (2026-06-08) -------------------
+# The five structured passes (_PASS_CONFIGS below) are DEFINED but NO LONGER
+# EXECUTED: the loop is gated off by _RUN_STRUCTURED_PASSES. The catch-all
+# engine.run() (base prompt, ALL rules) is the single refinement driver.
+#
+# WHY: the live 2-bit-counter run (artifacts/3f7e08d09b4b) showed the structured
+# passes were badly behaved — 16 of 26 pick_rule calls were JUNK. Passes 3
+# (datapath) and 5 (mapping) each spun to their step cap making Agent 3 invent
+# dead IntroduceVariable's; those dead vars are dropped at codegen so the OUTPUT
+# was clean, but (a) ~62% of the LLM budget was wasted, and (b) the persisted
+# refinement_chain.json became NON-REPLAYABLE: passes 3 and 5 both committed a
+# variable named 'count_concrete', and because each pass's apply() uniqueness
+# check only sees the live in-memory spec (not the cross-pass committed prefix
+# concatenated on disk by the engine's G13 logic), replaying the full chain from
+# scratch raises "IntroduceVariable: variable 'count_concrete' already exists" —
+# violating the engine's replay invariant and breaking the cocotb-failure
+# backtrack path if it ever fired. Root cause: the pass system prompts assume
+# every design needs every phase (a counter has no handshake/datapath/mapping
+# phase) and ask for a verbose pass-REPORT object incompatible with pick_rule's
+# {rule_name, params} contract.
+#
+# The catch-all already did the REAL work in 2-3 clean steps and is proven by the
+# offline e2e suite (FSM + ALU + counter). Collapsing to a SINGLE engine.run()
+# also eliminates the multi-pass chain concatenation that produced the
+# non-replayable chain: with no prior passes, committed_prefix is empty, so the
+# on-disk chain is exactly this one run's chain, and a duplicate IntroduceVariable
+# name can never be committed within a single run (apply() raises -> the engine
+# excludes the choice and never appends it).
+#
+# _PASS_CONFIGS and the pass-template files are RETAINED (not deleted): they are
+# pinned by tests/test_pass_templates.py (data-structure assertions only) and kept
+# for possible future re-enablement. To re-enable the schedule, flip this flag.
+_RUN_STRUCTURED_PASSES = False
+
+# Catch-all step cap. As the SOLE driver this must have headroom for the hardest
+# in-repo design. Recon: the hardest design (multi-op ALU) reaches RTL-style in
+# only 2 successful applies (Initialization, Iteration); the counter needs 3.
+# But max_steps counts EVERY loop iteration (strikes, excluded re-picks, TLC-gate
+# rejections), not just commits, so a free live picker that explores before
+# converging needs slack. 16 gives ~5x margin over the 3-step proven worst case.
+# Raising the cap is cost-free: Iteration idempotency + the engine's no-op /
+# 3-strike->backtrack guards make cycling impossible, so a larger cap only widens
+# the budget — it cannot loop. (Also inherited by run_stage3_backtrack_refinement.)
+_CATCHALL_MAX_STEPS = 16   # sole-driver cap (was 12; engine default is 200)
 
 try:
     from pipeline.agents import agent3 as _agent3
@@ -432,7 +476,15 @@ def _run_stage3_from_spec(
             tlc_gate = _make_tlc_gate(spec.module_name)
             refinement_warnings: list[str] = []
 
-            if _PASSES_AVAILABLE:
+            # Structured-pass schedule — GATED OFF (_RUN_STRUCTURED_PASSES).
+            # See the module-level rationale near _CATCHALL_MAX_STEPS: the five
+            # passes wasted ~62% of the LLM budget on junk IntroduceVariable picks
+            # and produced a NON-REPLAYABLE cross-pass chain. The catch-all below
+            # is now the sole driver. _PASS_CONFIGS / _make_pass_pick /
+            # _make_pass_termination are retained (pinned by
+            # tests/test_pass_templates.py, kept for future re-enablement) and are
+            # simply not invoked while the flag is False.
+            if _PASSES_AVAILABLE and _RUN_STRUCTURED_PASSES:
                 for pass_cfg in _PASS_CONFIGS:
                     allowed = pass_cfg["allowed"]
                     try:
@@ -451,6 +503,7 @@ def _run_stage3_from_spec(
                     except RefinementStall as e:
                         refinement_warnings.append(f"{pass_cfg['name']} stalled: {e}")
 
+            # Catch-all pass: base prompt, ALL rules, sole refinement driver.
             current_spec = _engine_run(
                 current_spec,
                 _make_pick_rule_callable(run_id=run_id, pass_name="catchall"),
@@ -763,8 +816,12 @@ update expressions that differ from the choices that led to the failure.
     # starting from step 0 of this sub-run (the prefix is in _prefix.json).
     chain_path.write_text(json.dumps(truncated_chain, indent=2))
 
-    # Re-run the engine from the truncation point (catch-all pass only — the
-    # structured passes already ran in the original attempt).
+    # Re-run the engine from the truncation point. This has always been
+    # catch-all only (no allowed_rule_names); with the structured passes now
+    # gated off in the forward path too, the original attempt was also a single
+    # catch-all run, so the truncated chain replayed above is a self-contained,
+    # collision-free single-run chain — replay-to-truncation cannot raise the
+    # cross-pass duplicate-name error that motivated the sole-driver change.
     try:
         tlc_gate = _make_tlc_gate(spec.module_name)
         final_spec = _engine_run(

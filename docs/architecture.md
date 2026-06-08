@@ -139,8 +139,8 @@ originally specced as "Agent 2"; the implementation simplified to pure templatin
    model-checks it (skipped if TLC is not installed). On a TLC error, Agent 3 revises
    and the compile→check loop repeats (≤ 3 attempts).
 3. The [Refinement Engine](refinement.md) lowers the spec to RTL-style, one rule at a
-   time, over a fixed schedule of [passes](refinement.md#multi-pass-schedule). Each
-   step is logged to `refinement_chain.json`.
+   time, in a single [catch-all pass](refinement.md#refinement-driver-the-catch-all-pass)
+   (all rules, base prompt). Each step is logged to `refinement_chain.json`.
 4. A one-shot Agent-3 [correctness critic](refinement.md#the-correctness-critic) gates
    the refined spec before codegen.
 5. [Compiler 2](compilers.md#compiler-2) emits Verilog-2001 to `output.v`.

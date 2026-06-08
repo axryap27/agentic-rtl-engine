@@ -21,7 +21,7 @@ _Last updated: 2026-06-08._
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **257 passed, 0 xfailed** |
+| Deterministic test suite | **260 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
 cocotb PASS offline** on two medium designs — a traffic-light FSM and a multi-op ALU —
@@ -48,22 +48,34 @@ stub picker had masked. Both are now fixed and regression-tested in
   already-clocked action, and the engine rejects no-op applications instead of
   committing-and-spinning.
 
-With the captured clean spec, the **full Stage-3 path (five structured passes +
-catch-all) now converges to a correct, lint-clean, cocotb-passing 2-bit counter
-offline** (`test_full_stage3_converges_on_captured_counter`, `..._passes_cocotb`).
+With the captured clean spec, the **full Stage-3 path now converges to a correct,
+lint-clean, cocotb-passing 2-bit counter offline** (`test_full_stage3_converges_on_captured_counter`,
+`..._passes_cocotb`).
 
-### Known: structured-pass prompt/contract mismatch
+### Resolved: catch-all is now the sole refinement driver
 
-The five structured-pass prompts (`pipeline/refinement_templates/passN_*.py`) instruct
-Agent 3 to emit a verbose pass-report object (`status`/`artifact`/`diagnostics`), which
-is **incompatible with `pick_rule`'s `{rule_name, params}` contract** — and they assume
-every design needs every phase (a counter has no handshake/datapath/mapping phase).
-Today this is *tolerated*: the engine robustness above skips passes where Agent 3
-declines, and the catch-all (base prompt, all rules) carries convergence. The clean fix
-— reconcile the templates to the pick contract, or make the catch-all the sole driver —
-is a **cost optimization** (it would cut the wasted per-pass Agent-3 calls) and an
-architecture decision, not a correctness blocker. `tests/test_pass_templates.py` pins
-the 5-pass shape, so that change must update it too.
+The five structured-pass prompts (`pipeline/refinement_templates/passN_*.py`) instructed
+Agent 3 to emit a verbose pass-report object (`status`/`artifact`/`diagnostics`),
+**incompatible with `pick_rule`'s `{rule_name, params}` contract** — and they assumed
+every design needs every phase (a counter has no handshake/datapath/mapping phase). On
+the live 2-bit counter this wasted ~62% of the LLM budget (16 of 26 `pick_rule` calls
+were junk) AND produced a **non-replayable** `refinement_chain.json`: passes 3 and 5 both
+committed an `IntroduceVariable` named `count_concrete` (the per-pass uniqueness check
+sees only the live in-memory spec, not the cross-pass committed prefix the engine
+concatenates on disk), so replaying the full chain from scratch raised
+`"IntroduceVariable: variable 'count_concrete' already exists"`.
+
+**Resolution (implemented 2026-06-08):** the structured-pass loop is gated off
+(`stage3._RUN_STRUCTURED_PASSES = False`) and the catch-all (base prompt, all rules) is
+the **sole** refinement driver. A single `engine.run()` makes the on-disk chain
+self-contained and replayable, and a duplicate `IntroduceVariable` name can never be
+committed within one run. `_PASS_CONFIGS` and the pass-template files are **retained**
+(pinned by `tests/test_pass_templates.py`, kept for future re-enablement), so that suite
+stays green untouched. `_CATCHALL_MAX_STEPS` was raised 12 → 16 for sole-driver headroom;
+idempotency + the no-op / 3-strike→backtrack guards make a larger cap cycle-free.
+Regression: `tests/test_catchall_sole_driver.py` pins that the catch-all-only chain
+replays cleanly with no duplicate `IntroduceVariable` names. The single confirming live
+`main.py` run remains the only open verification (it is metered).
 
 The gated live-refinement-convergence test (`agentic_tests/test_refinement_convergence_live.py`)
 and the deterministic usage-ledger / diagnoser coverage (`tests/test_usage_ledger.py`,

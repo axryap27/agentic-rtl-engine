@@ -108,27 +108,47 @@ collapsed first-wins.
 
 ---
 
-## Multi-pass schedule
+## Refinement driver: the catch-all pass
 
-**File:** `pipeline/refinement_templates/` · driven by `stage3._PASS_CONFIGS`
+**File:** `pipeline/nodes/stage3.py` — single `engine.run()` with no `allowed_rule_names`
 
-A single open-ended refinement is brittle, so Stage 3 runs the engine over an ordered
-schedule of **passes**, each restricting the engine to a small `allowed` rule set with
-its own Agent-3 system prompt and step budget. The refined spec threads through the
-passes in memory; the on-disk chain **accumulates** across passes (same `run_id`), so
-a replay of the full chain reconstructs the final multi-pass spec.
+Stage 3 drives refinement with **one catch-all engine pass**: the base Agent-3 system
+prompt, **all** rules available, run until `is_rtl_style` (cap `_CATCHALL_MAX_STEPS`).
+A single `engine.run()` produces **one self-contained, replayable chain** — replaying it
+from the initial abstract spec reconstructs the final RTL-style spec exactly.
 
-| Pass | Allowed rules | `max_steps` | Purpose |
-|---|---|---:|---|
-| `pass1_fsm` | `SequentialComposition`, `Iteration` | 50 | resolve control into an explicit FSM / clocked structure |
-| `pass2_handshake` | `Alternation`, `IntroduceVariable` | 30 | add valid/ready handshake & backpressure branches |
-| `pass3_datapath` | `Assignment`, `IntroduceVariable` | 30 | turn data variables into concrete registers with load/hold/clear |
-| `pass4_reset` | `Initialization` | 20 | add synchronous reset to every state variable |
-| `pass5_mapping` | `IntroduceVariable` | 20 | complete the abstraction mapping (supply missing symbols) |
+### Retained-but-not-executed: the structured-pass schedule
 
-After the structured passes, Stage 3 runs **one final catch-all engine pass with no
-`allowed_rule_names` filter** to finish any remaining refinement, then applies the
-correctness critic below.
+An earlier design ran the engine over an ordered schedule of five **passes**, each
+restricting the engine to a small `allowed` rule set with its own Agent-3 system prompt
+(`pipeline/refinement_templates/passN_*.py`, driven by `stage3._PASS_CONFIGS`):
+
+| Pass | Allowed rules | Purpose |
+|---|---|---|
+| `pass1_fsm` | `SequentialComposition`, `Iteration` | resolve control into an explicit FSM / clocked structure |
+| `pass2_handshake` | `Alternation`, `IntroduceVariable` | add valid/ready handshake & backpressure branches |
+| `pass3_datapath` | `Assignment`, `IntroduceVariable` | turn data variables into concrete registers with load/hold/clear |
+| `pass4_reset` | `Initialization` | add synchronous reset to every state variable |
+| `pass5_mapping` | `IntroduceVariable` | complete the abstraction mapping (supply missing symbols) |
+
+This schedule is **no longer executed** — it is gated off by the module flag
+`stage3._RUN_STRUCTURED_PASSES` (`False`). The `_PASS_CONFIGS` data structure and the
+pass-template files are **retained** (pinned by `tests/test_pass_templates.py`, and
+available for future re-enablement by flipping the flag).
+
+**Why it was disabled.** The passes assumed every design needs every phase (a counter
+has no handshake/datapath/mapping phase), so on simple designs Agent 3 was forced to
+invent dead `IntroduceVariable`s — on the live 2-bit counter, 16 of 26 `pick_rule` calls
+were junk. Worse, because each pass is a separate `engine.run()` with the same `run_id`,
+the on-disk chain **accumulated** across passes (each pass appended its steps as a
+committed prefix), but `IntroduceVariable`'s name-uniqueness check only sees the live
+in-memory spec — not the cross-pass prefix. Two passes could therefore commit the same
+variable name (`pass3` and `pass5` both added `count_concrete`), producing a chain that
+**fails to replay from scratch**. Collapsing to a single catch-all run fixes this at the
+root: with no prior passes the committed prefix is empty, the on-disk chain is exactly
+one run's chain, and a duplicate name can never be committed within one run (`apply()`
+raises → the engine excludes the choice and never appends it). After the catch-all,
+Stage 3 applies the correctness critic below.
 
 ### The correctness critic
 
