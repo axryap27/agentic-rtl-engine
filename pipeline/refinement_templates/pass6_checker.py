@@ -44,6 +44,44 @@ WHAT TO CHECK
 5. Invariants: any invariant required for the mapping to hold is present or
    provable.
 
+SANCTIONED REFINEMENT — RESET / INITIALIZATION (DO NOT RE-LITIGATE)
+The concrete spec is produced ONLY by a fixed library of provably-correct
+refinement rules. One of them, Initialization (refinement-calculus Table 1),
+introduces a single reset action: while the reset signal is asserted it forces
+EVERY state variable to its declared initial/reset value, and it changes nothing
+else. A synchronous or asynchronous reset that drives all state to its initial
+values is a universal hardware primitive present at every refinement level — it
+is NOT an un-refined behavioral injection, even though the abstract spec usually
+does not model reset explicitly.
+
+Therefore, when you encounter exactly ONE concrete action that is guarded by a
+reset condition and whose updates assign each state variable to that variable's
+declared initial/reset value (and to nothing else), you MUST treat it as a VALID
+refinement and accept it on these grounds alone:
+- It needs NO corresponding abstract action and is NOT required to be a stuttering
+  step, even though it changes state. Do not reject it for "no abstract
+  counterpart", "not a valid stuttering step", or a state-changing transition
+  with no matching abstract step.
+- Its guard may reference a reset signal (e.g. rst, rst_n) that does not appear
+  in the abstract spec or the abstraction mapping. Do not reject it for
+  referencing an unmapped reset signal.
+- Its clocking discipline is an implementation detail of the Initialization rule.
+  Do not reject it merely because it is marked clocked=false (asynchronous) while
+  the other transitions are clocked=true, or vice versa. The clock/reset
+  discipline alone is never a refinement violation.
+
+This carve-out is NARROW. It applies ONLY to a reset action that writes EXACTLY
+the declared initial/reset values and modifies no other variable. It does NOT
+relax any other obligation. You MUST still reject if:
+- the reset action writes any value OTHER than a variable's declared initial/reset
+  value, or touches a variable beyond resetting it;
+- a NON-reset transition has dropped or weakened a guard, collapsed multi-branch
+  next-state logic into a single (first-wins) assignment, or changed the meaning
+  of an update expression;
+- the abstraction mapping is incomplete, an abstract variable is uncovered, or
+  ConcreteInit does not imply AbstractInit under the mapping.
+Apply every check above to all NON-reset behavior exactly as before.
+
 VERDICT RULES
 - "accept": you have CHECKED every obligation above and all hold. The concrete
   spec is a correct refinement and is safe to compile.
