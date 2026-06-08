@@ -28,6 +28,15 @@ class Iteration(RefinementRule):
 
         for action in result.get("actions", []):
             if action["name"] == action_name:
+                # Idempotent: re-applying Iteration to an already-clocked action
+                # must be a no-op. The guard re-wrapping below used to add one
+                # paren layer on EVERY call, so a picker that re-picked the same
+                # action kept changing the spec hash and the engine cycled to
+                # max_steps instead of converging (the 2-bit-counter stall:
+                # Iteration(Increment) was chosen 8 times in a row). Returning
+                # here leaves first-application behaviour byte-for-byte unchanged.
+                if action.get("clocked", False):
+                    return result
                 action["clocked"] = True
                 # An action wrapped in iteration checks its guard every cycle.
                 # Prepend the clock-enable guard if not already present.

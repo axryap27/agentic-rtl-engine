@@ -390,7 +390,22 @@ def run(
         ]
 
         # --- Invoke pick_rule (the injected callable, NOT an LLM call here) ---
-        choice = pick_rule(applicable_descs, spec)
+        # A pick_rule FAILURE (the LLM returns unparseable or non-pick JSON, a
+        # transport error, a max_tokens truncation, ...) must NEVER abort the
+        # whole refinement run. Treat it exactly like an invalid return: strike
+        # at this depth and backtrack after 3 (the same D3/D4 policy, extended
+        # to the picker THROWING rather than returning a bad dict). Without this,
+        # one bad Agent-3 response on any pass kills the entire pipeline — the
+        # 2-bit-counter handshake-pass crash that produced a 'partial' artifact.
+        try:
+            choice = pick_rule(applicable_descs, spec)
+        except Exception:
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
+            continue
 
         # --- Validate pick_rule's return ---
         applicable_names = [r.__class__.__name__ for r in applicable]
@@ -435,6 +450,22 @@ def run(
             continue
 
         post_hash = _spec_hash(new_spec)
+
+        # --- No-op guard: an application that does not change the spec made no
+        # progress toward RTL-style. Committing it lets a picker that keeps
+        # choosing an already-satisfied rule (e.g. Iteration on an
+        # already-clocked action — now idempotent) spin: it would append
+        # identical no-op steps until max_steps. Treat a no-op like an invalid
+        # pick: exclude this exact choice here and strike; backtrack after 3 so
+        # the picker is forced toward a rule/params that actually advance.
+        if post_hash == pre_hash:
+            excluded_at.setdefault(depth, set()).add((rule_name, params_json))
+            invalid_counts[depth] = invalid_counts.get(depth, 0) + 1
+            if invalid_counts[depth] >= 3:
+                spec, chain = _backtrack(
+                    formal_spec, chain, excluded_at, MAX_BACKTRACK_DEPTH
+                )
+            continue
 
         # --- TLC gate: verify the candidate spec before committing ---
         if tlc_check is not None and not tlc_check(new_spec):
