@@ -391,11 +391,31 @@ def _reset_port(artifact_dir: Path) -> str:
         return "reset"
 
 
+def _reset_active_low(artifact_dir: Path) -> bool:
+    """Best-effort reset polarity from 01_summary.json (FIX RC1).
+
+    True when the design's reset is active-low (asserted at 0). Threaded into
+    BOTH the reverse bridge and Compiler 2 so the emitted reset test matches the
+    cocotb generator's active-low assert/deassert ordering. Fail-soft to False
+    (active-high) when the summary is missing/unreadable/not success — mirrors
+    `_reset_port`, so existing active-high designs are byte-identical.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        if data.get("status") != "success":
+            return False
+        summary = SpecSummary.model_validate(data)
+        return bool(summary.reset_active_low)
+    except Exception:
+        return False
+
+
 def _run_stage3_from_spec(
     state: PipelineState,
     spec: FormalSpec,
     port_widths: dict[str, int] | None = None,
     reset_port: str = "reset",
+    reset_active_low: bool = False,
 ) -> PipelineState:
     """
     Run the TLC loop, refinement engine, and Compiler 2 for a given FormalSpec.
@@ -410,6 +430,10 @@ def _run_stage3_from_spec(
     reset_port: the design's reset input name (FIX 1), threaded into BOTH the
     reverse bridge and Compiler 2 so the emitted reset port matches the cocotb
     generator's `dut.<reset_port>`. Defaults to "reset".
+    reset_active_low: the design's reset polarity (FIX RC1), threaded alongside
+    reset_port into BOTH the reverse bridge and Compiler 2 so the emitted reset
+    test (`if (!rst_n)` vs `if (rst_n)`) matches the cocotb generator's
+    assert/deassert ordering. Defaults to False (active-high).
     """
     run_id = state["run_id"]
     artifact_dir = Path("artifacts") / run_id
@@ -519,6 +543,7 @@ def _run_stage3_from_spec(
             rtl_tla_source = engine_spec_to_rtl_tla(
                 current_spec, spec.module_name,
                 port_widths=port_widths, reset_port=reset_port,
+                reset_active_low=reset_active_low,
             )
             refined_engine_spec = current_spec
             refinement_ok = True
@@ -569,7 +594,10 @@ def _run_stage3_from_spec(
         return state
 
     try:
-        compiler = RTLTLACompiler(rtl_tla_source, reset_port=reset_port)
+        compiler = RTLTLACompiler(
+            rtl_tla_source, reset_port=reset_port,
+            reset_active_low=reset_active_low,
+        )
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
@@ -646,8 +674,11 @@ def run_stage3(state: PipelineState) -> PipelineState:
     # FIX 1: thread the design's actual reset-port name so the emitted reset
     # port matches the cocotb generator's `dut.<reset_port>`.
     reset_port = summary.reset_port or "reset"
+    # FIX RC1: thread reset polarity so an active-low design emits `if (!rst_n)`.
+    reset_active_low = bool(summary.reset_active_low)
     return _run_stage3_from_spec(
         state, spec, port_widths=port_widths, reset_port=reset_port,
+        reset_active_low=reset_active_low,
     )
 
 
@@ -711,6 +742,7 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
         state, revised,
         port_widths=_input_port_widths(artifact_dir),
         reset_port=_reset_port(artifact_dir),
+        reset_active_low=_reset_active_low(artifact_dir),
     )
 
 
@@ -835,6 +867,7 @@ update expressions that differ from the choices that led to the failure.
             final_spec, spec.module_name,
             port_widths=_input_port_widths(artifact_dir),
             reset_port=_reset_port(artifact_dir),
+            reset_active_low=_reset_active_low(artifact_dir),
         )
     except RefinementStall as exc:
         _write_error(rtl_path, f"Backtrack refinement stalled: {exc}")
@@ -845,7 +878,10 @@ update expressions that differ from the choices that led to the failure.
 
     # Compiler 2 → Verilog-2001
     try:
-        compiler = RTLTLACompiler(rtl_tla_source, reset_port=_reset_port(artifact_dir))
+        compiler = RTLTLACompiler(
+            rtl_tla_source, reset_port=_reset_port(artifact_dir),
+            reset_active_low=_reset_active_low(artifact_dir),
+        )
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)

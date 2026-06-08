@@ -248,6 +248,7 @@ def verify_banlist(verilog: str) -> None:
 
 def compile_tla_to_verilog(
     tla_source: str, module_name: str, reset_port: str = "reset",
+    reset_active_low: bool = False,
 ) -> str:
     """
     Compiler 2 public entry point.
@@ -263,6 +264,10 @@ def compile_tla_to_verilog(
             reset_port passed to ``engine_spec_to_rtl_tla`` so the
             ``IF {reset_port} = 1 THEN`` reset block is recognised and the reset
             port is emitted under the correct name. Defaults to "reset".
+        reset_active_low: reset polarity (FIX RC1). Must match the
+            reset_active_low passed to ``engine_spec_to_rtl_tla``. When True the
+            sequential block tests ``if (!{reset_port})``; when False (default)
+            it tests ``if ({reset_port})``.
 
     Returns:
         Synthesizable Verilog-2001 source as a string.
@@ -270,7 +275,9 @@ def compile_tla_to_verilog(
     Raises:
         BanlistViolation: if emitted code contains a banned construct.
     """
-    verilog = RTLTLACompiler(tla_source, reset_port=reset_port).compile(module_name)
+    verilog = RTLTLACompiler(
+        tla_source, reset_port=reset_port, reset_active_low=reset_active_low
+    ).compile(module_name)
     verify_banlist(verilog)
     return verilog
 
@@ -399,7 +406,8 @@ class RTLTLACompiler:
     # Verification-only variable prefix — dropped entirely from Verilog output
     _VERIFY_VAR = re.compile(r"^hw_")
 
-    def __init__(self, tla_code: str, reset_port: str = "reset"):
+    def __init__(self, tla_code: str, reset_port: str = "reset",
+                 reset_active_low: bool = False):
         self.tla_code = tla_code
         # FIX 1: the reset port name is configurable so it matches the cocotb
         # generator's `dut.<reset_port>`. clk + this reset name are the fixed
@@ -407,6 +415,13 @@ class RTLTLACompiler:
         # an instance value so the reset name flows into every classification,
         # range, port-decl, and undeclared-input check. Defaults to "reset".
         self.reset_port = reset_port
+        # FIX RC1: reset polarity. When True (active-low) the sequential block
+        # tests `if (!{reset_port})` (reset asserted at 0); when False (default,
+        # active-high) it tests `if ({reset_port})`. THIS flag — not the bridge's
+        # cosmetic "= 0"/"= 1" — controls the emitted Verilog reset polarity, so
+        # it must agree with the bridge's reset_active_low and the cocotb
+        # generator's assert/deassert ordering.
+        self.reset_active_low = reset_active_low
         self._FIXED_INPUTS = frozenset(["clk", reset_port])
         self.variables: list[str] = []
         # Per-variable bit width, captured from the "\* width: N" comment the
@@ -890,7 +905,13 @@ class RTLTLACompiler:
             out.append("    // Clocked pipeline evolution")
             out.append("    always @(posedge clk) begin")
             if reset_assigns:
-                out.append(f"        if ({self.reset_port}) begin")
+                # FIX RC1: active-low resets are asserted at 0 -> negate the
+                # level test so the DUT resets exactly when the harness asserts.
+                reset_cond = (
+                    f"!{self.reset_port}" if self.reset_active_low
+                    else f"{self.reset_port}"
+                )
+                out.append(f"        if ({reset_cond}) begin")
                 for var, expr in reset_assigns:
                     out.append(f"            {var} <= {self.translate_expr(expr)};")
                 out.append("        end else begin")

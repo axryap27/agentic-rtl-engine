@@ -617,6 +617,7 @@ def engine_spec_to_rtl_tla(
     module_name: str,
     port_widths: dict | None = None,
     reset_port: str = "reset",
+    reset_active_low: bool = False,
 ) -> str:
     """
     Convert a post-refinement engine spec dict to RTL-style TLA+ text.
@@ -639,6 +640,15 @@ def engine_spec_to_rtl_tla(
             ``IF {reset_port} = 1 THEN`` reset condition in UpdatePipeline; the
             matching Compiler-2 instance must be constructed with the same
             reset_port.
+        reset_active_low: reset polarity (FIX RC1). When True the reset is
+            asserted at 0, so the emitted reset condition becomes
+            ``IF {reset_port} = 0 THEN``; when False (default) it stays
+            ``IF {reset_port} = 1 THEN`` (active-high). This value is cosmetic for
+            codegen on its own — Compiler 2 derives the actual Verilog reset test
+            from its own ``reset_active_low`` flag — but keeping the TLA condition
+            consistent with the Verilog avoids a confusing spec/RTL mismatch. The
+            matching Compiler-2 instance MUST be constructed with the same
+            reset_active_low.
 
     Returns:
         TLA+ source string ready for Compiler 2.
@@ -727,7 +737,11 @@ def engine_spec_to_rtl_tla(
     lines.append("    /\\ clk' = 1 - clk")
 
     if reset_action:
-        lines.append(f"    /\\ IF {reset_port} = 1 THEN")
+        # Reset-asserted level: 0 for active-low, 1 for active-high (default).
+        # _split_reset_else in Compiler 2 matches "IF {reset_port}" value-agnostic,
+        # so emitting "= 0" does not break reset/else splitting.
+        reset_level = 0 if reset_active_low else 1
+        lines.append(f"    /\\ IF {reset_port} = {reset_level} THEN")
         for var, expr in _action_update_exprs(reset_action):
             lines.append(f"          /\\ {var}' = {expr}")
         lines.append("       ELSE")
