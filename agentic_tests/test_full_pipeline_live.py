@@ -20,6 +20,7 @@ configured cap (default $100). Kept to ONE run on the 2-bit counter to bound cos
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -28,6 +29,17 @@ import pytest
 import pipeline.graph
 from pipeline.schemas.envelope import ArtifactEnvelope
 from pipeline.state import PipelineState
+
+# This full end-to-end live run is the most expensive test in the suite — it drives
+# the WHOLE graph (Agent 1 + Agent 3 + diagnoser + cocotb) live, so a single run can
+# cost a lot of Agent-3 tokens. It is gated behind an EXTRA explicit opt-in on top of
+# the usual live gates: `pytest agentic_tests -m live_llm` SKIPS it unless
+# RUN_FULL_PIPELINE_LIVE=1 is also set. (It still carries the live_llm marker, so a
+# plain `pytest` never collects it.)
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_FULL_PIPELINE_LIVE") != "1",
+    reason="expensive full-pipeline live run; set RUN_FULL_PIPELINE_LIVE=1 to include it",
+)
 
 
 # SystemVerilog tokens that must NOT appear in the emitted Verilog-2001 (CLAUDE.md
