@@ -5,19 +5,20 @@ Agentic RTL Engine — pipeline entry point.
 Usage:
     python3.11 main.py                         # run with default 2-bit counter spec
     python3.11 main.py "your NL spec here"    # run with a custom NL spec
+    python3.11 main.py --clean-artifacts [N]   # prune all but the N newest runs (default 10)
 
 What this script does:
-1. Creates a unique run directory under artifacts/<run_id>/.
+1. Creates a date-stamped run directory under artifacts/<YYYY-MM-DD>/<HHMMSS>-<hash>/.
 2. Writes the NL prompt to 00_nl_spec.json (seeds the artifact chain).
 3. Invokes the LangGraph pipeline.
-4. Prints a summary of the terminal result.
+4. Renames the run dir to fold in the module name, refreshes artifacts/latest,
+   and prints a summary of the terminal result.
 
 Environment: copy .env.example to .env and fill in credentials before running.
 """
 
 import json
 import sys
-import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,6 +27,7 @@ load_dotenv()  # must happen before any pipeline imports that read env vars
 
 from pipeline.graph import get_graph
 from pipeline.state import PipelineState
+from pipeline.run_dirs import new_run_id, finalize_run_dir, clean_artifacts
 
 # ---------------------------------------------------------------------------
 # Default specification
@@ -45,6 +47,13 @@ next rising clock edge.
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Housekeeping mode: prune old runs and exit (no pipeline invocation).
+    if len(sys.argv) > 1 and sys.argv[1] == "--clean-artifacts":
+        keep = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 10
+        deleted, kept = clean_artifacts(keep=keep)
+        print(f"[main] removed {deleted} old run(s), kept {kept}")
+        return
+
     # Determine NL spec: from CLI arg or default
     if len(sys.argv) > 1:
         nl_prompt = " ".join(sys.argv[1:])
@@ -52,8 +61,10 @@ def main() -> None:
         nl_prompt = _DEFAULT_SPEC
         print("[main] Using default 2-bit counter spec.")
 
-    # Create a unique run ID and artifact directory
-    run_id = uuid.uuid4().hex[:12]
+    # Create a date-stamped run ID and artifact directory. run_id is a relative
+    # path ("YYYY-MM-DD/HHMMSS-<hash>"); the module name is spliced into the leaf
+    # after the run completes (finalize_run_dir).
+    run_id = new_run_id()
     artifact_dir = Path("artifacts") / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -77,8 +88,13 @@ def main() -> None:
     graph = get_graph()
     final_state = graph.invoke(initial_state)
 
+    # Fold the module name into the run dir leaf and refresh artifacts/latest.
+    # (Safe post-run: the graph is done, so no in-flight paths reference the dir.)
+    artifact_dir, run_id = finalize_run_dir(artifact_dir)
+
     # Report terminal result
     print("\n[main] Pipeline complete.")
+    print(f"[main] Run dir: {artifact_dir}/  (artifacts/latest -> this run)")
     print(f"[main] Final retry counts: {final_state.get('retry_counts', {})}")
 
     eval_path = artifact_dir / "04_evaluation.json"
