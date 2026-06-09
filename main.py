@@ -105,7 +105,19 @@ def main() -> None:
         status = eval_data.get("status", "unknown")
         print(f"[main] Evaluation status: {status}")
         if status == "success":
-            print("[main] SUCCESS — RTL passed cocotb testbench.")
+            disagreement = eval_data.get("vector_disagreement")
+            if disagreement:
+                # cocotb passed against the spec-derived reference, but Agent 1's
+                # vectors disagreed with the spec — not a clean pass.
+                print(
+                    f"[main] PASSED WITH UNRESOLVED AGENT-1/SPEC DISAGREEMENT at "
+                    f"{len(disagreement)} vector point(s) — RTL matches the spec but "
+                    f"not Agent 1's golden vectors. This is either an Agent-1 vector "
+                    f"error (a false red avoided) or a spec/intent bug; review "
+                    f"02_vector_check.json."
+                )
+            else:
+                print("[main] SUCCESS — RTL passed cocotb testbench.")
         else:
             print(f"[main] FAIL — {eval_data.get('error', 'no detail')}")
     elif rtl_path.exists():

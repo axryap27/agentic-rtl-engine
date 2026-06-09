@@ -15,13 +15,13 @@ _Last updated: 2026-06-09._
 | Stage 1 — prompt → `SpecSummary` (Agent 1) | built |
 | Stage 2 — testbench generation (deterministic) | built |
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
-| Stage 4 — cocotb simulation (deterministic) | built |
+| Stage 4 — cocotb simulation (deterministic) | built; **spec-derived golden-vector cross-check** (removes Agent-1 false reds; flags Agent-1/spec disagreements) |
 | Diagnoser — failure classification + routing | built |
 | Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator, register file, FIFO; robust to a throwing/cycling live picker |
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** (`reg [w-1:0] mem [0:K-1]`, indexed read/write) and **combinational outputs** (`assign`-driven wires, e.g. FIFO flags) |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **331 passed, 0 xfailed** |
+| Deterministic test suite | **348 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
 cocotb PASS offline** on five medium designs — a traffic-light FSM, a multi-op ALU, an
@@ -302,7 +302,41 @@ spec). **Architectural finding:** Agent-1 hand-computed golden vectors are a fra
 grows with sequential-design complexity; the robust fix is to derive golden vectors
 deterministically from the `FormalSpec` (itself an executable model) rather than from a
 one-shot LLM. The FIFO **codegen + combinational-output support are validated**; live
-*verification* of deep sequential designs is the open item.
+*verification* of deep sequential designs was the open item — now addressed by the
+spec-derived golden-vector cross-check below.
+
+### Spec-derived golden vectors — the verification root-cause fix
+
+The FIFO false red exposed that Agent 1's hand-computed golden vectors don't scale to deep
+sequential designs. The fix turns the `FormalSpec` (an executable model) into the source of
+truth for the expected outputs:
+
+- **`pipeline/cocotb/spec_sim.py`** — an independent recursive-descent interpreter + cycle-
+  accurate simulator of the refined engine spec, matching the generated Verilog + cocotb
+  harness exactly (reset pulse, one edge per vector, nonblocking read-before-write, continuous
+  combinational outputs via fixpoint, memory arrays with X-until-written, **unsigned 32-bit
+  arithmetic** re-masked to each signal's width at commit). It reproduces **all five** design
+  classes' real-cocotb-proven traces exactly.
+- **`pipeline/cocotb/vector_check.py`** — reconstructs the refined spec from disk (via the
+  engine's replay invariant), derives correct expecteds from Agent 1's **input stimulus**,
+  builds a spec-corrected testbench, and records every Agent-1-vs-spec disagreement in
+  `02_vector_check.json`. Fail-soft (falls back to Agent 1's testbench on any issue, or unless
+  every output is actually asserted — no all-X silent pass).
+- **`pipeline/nodes/stage4.py`** — runs the cross-check before cocotb, so cocotb checks the RTL
+  against the spec-derived reference. This **removes the false-red class** (a correct RTL is
+  never failed by a wrong Agent-1 vector) and cross-validates Compiler 2 against an independent
+  interpreter. Proven on the live FIFO artifacts: the cross-check flags exactly v10 and cocotb
+  against spec-derived expecteds **passes** the live RTL.
+
+**Verification semantics (and the guardrail against a NEW false green):** because cocotb now
+checks the RTL against a spec-derived reference, a *spec* bug could pass (bug-vs-bug). To keep
+that visible, an Agent-1-vs-spec disagreement is recorded on `04_evaluation.json`
+(`vector_disagreement`) and `main.py` reports **"PASSED WITH UNRESOLVED AGENT-1/SPEC
+DISAGREEMENT"** — a passing-but-flagged run, never a silent clean green. (Routing such a run
+to the diagnoser as a candidate spec bug is a noted follow-up.) A 4-lens adversarial review
+returned go-with-fixes; all fixes are landed (the unsigned-underflow divergence, input
+normalization, the all-X / spec-undriven-output guard, and the disagreement surfacing).
+Suite 331→348.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 

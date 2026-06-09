@@ -65,12 +65,46 @@ def run_stage4(state: PipelineState) -> PipelineState:
         _write_error(eval_path, "pipeline.cocotb.runner could not be imported")
         return state
 
+    # ---- Spec-derived golden-vector cross-check (false-red removal) ----
+    # Agent 1 hand-computes the golden vectors; on deep sequential designs its
+    # arithmetic is fragile (the live FIFO run failed a CORRECT RTL on one bad
+    # vector). Re-derive the expected outputs from the REFINED spec via an
+    # independent interpreter so a correct RTL is never failed by a wrong Agent-1
+    # vector, and surface any Agent-1/spec disagreement in 02_vector_check.json.
+    # Best-effort: on any issue we run Agent 1's original testbench unchanged.
+    vector_check = None
+    try:
+        from pipeline.cocotb.vector_check import apply_spec_derived_vectors
+        vc = apply_spec_derived_vectors(artifact_dir)
+        if vc is not None:
+            testbench_path = vc["testbench_path"]
+            vector_check = vc
+    except Exception:
+        vector_check = None
+
     # Run simulation
     try:
         result = run_testbench(testbench_path, verilog_path, module_name)
         # Validate the status envelope (BUG-13) before writing.
         if result.get("status") == "pass":
-            write_artifact(eval_path, {"status": "success"})
+            eval_artifact = {"status": "success"}
+            # cocotb passed against the SPEC-DERIVED reference. If Agent 1's golden
+            # vectors DISAGREED with the spec, the RTL matches the spec but not
+            # Agent 1 — EITHER an Agent-1 arithmetic slip (a false red this feature
+            # avoided) OR a spec/intent bug. Record it so the pass is NOT reported
+            # as clean and a possible spec bug is visible, not silently shipped
+            # green. (status stays 'success' so routing is unchanged; the signal is
+            # carried on the artifact + surfaced by main.py.)
+            if vector_check is not None and not vector_check.get("agreed", True):
+                report = vector_check.get("report", {})
+                eval_artifact["vector_disagreement"] = report.get("disagreements", [])
+                eval_artifact["vector_check_note"] = (
+                    "cocotb passed against spec-derived expecteds, but Agent 1's "
+                    "golden vectors disagree with the spec at the listed vectors — "
+                    "either an Agent-1 vector error (a false red avoided) or a "
+                    "spec/intent bug. Review 02_vector_check.json."
+                )
+            write_artifact(eval_path, eval_artifact)
         else:
             write_artifact(eval_path, {
                 "status":         "error",
