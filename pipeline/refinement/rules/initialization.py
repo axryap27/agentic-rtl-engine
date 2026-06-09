@@ -25,8 +25,11 @@ class Initialization(RefinementRule):
         # (see engine.is_rtl_style). Its missing reset_value must NOT keep
         # Initialization applicable, or the rule would fire forever on any design
         # containing a memory (every re-pick a no-op → strikes → stall).
+        # A combinational output is likewise never reset (it is a wire), so it
+        # too must not count as an unreset register.
         has_unreset_var = any(
-            v.get("reset_value") is None and not v.get("depth") for v in variables
+            v.get("reset_value") is None and not v.get("depth") and not v.get("combinational")
+            for v in variables
         )
         has_reset_action = spec.get("reset_action") is not None
         return has_unreset_var or not has_reset_action
@@ -40,19 +43,22 @@ class Initialization(RefinementRule):
         # A memory array (depth set) is never reset (see is_applicable above and
         # engine.is_rtl_style). Resetting it would emit an illegal whole-array
         # `mem <= 0` that iverilog rejects — and there is no codegen-time lint gate
-        # to catch it before Stage 4. Drop any memory name the caller put in
-        # reset_values so a stray pick can never produce that: the rule resets
-        # scalar registers only.
-        mem_names = {v["name"] for v in result.get("variables", []) if v.get("depth")}
+        # to catch it before Stage 4. A combinational output (a wire) is likewise
+        # never reset. Drop any such name the caller put in reset_values so a stray
+        # pick can never produce a bad reset: the rule resets scalar registers only.
+        no_reset_names = {
+            v["name"] for v in result.get("variables", [])
+            if v.get("depth") or v.get("combinational")
+        }
 
         for var in result["variables"]:
-            if var["name"] in reset_values and var["name"] not in mem_names:
+            if var["name"] in reset_values and var["name"] not in no_reset_names:
                 var["reset_value"] = reset_values[var["name"]]
 
         reset_updates = [
             {"variable": name, "expression": expr}
             for name, expr in reset_values.items()
-            if name not in mem_names
+            if name not in no_reset_names
         ]
         reset_action = {
             "name": action_name,

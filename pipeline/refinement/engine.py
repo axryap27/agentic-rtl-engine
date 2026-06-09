@@ -108,7 +108,11 @@ def is_rtl_style(spec: dict) -> bool:
         # reverse bridge likewise emits no reset conjunct for it. (Mirrors the
         # rule-5 identity-hold carve-out below: a structural exception, not a relax
         # of the invariant for ordinary registers, which still must reset.)
-        if var.get("depth"):
+        #
+        # A combinational output (driven by a continuous `assign`) is a wire, not a
+        # register: it has no reset and is born concrete (the bridge sets
+        # abstract=False). Carve it out of the reset requirement too.
+        if var.get("depth") or var.get("combinational"):
             continue
         if var.get("reset_value") is None:
             return False
@@ -121,6 +125,12 @@ def is_rtl_style(spec: dict) -> bool:
         # if the picker happened to Iterate a redundant Hold action. The bridge
         # likewise drops such actions from CombinationalLogic (no double-drive).
         if _is_identity_hold(action):
+            continue
+        # A combinational action is continuous logic (an `assign`), not a clocked
+        # register update, so it need not be clocked — the reverse bridge emits it
+        # as CombinationalLogic. (Same structural-exception shape as the identity
+        # hold above; ordinary register actions still must be clocked.)
+        if action.get("combinational", False):
             continue
         if not action.get("clocked", False):
             return False

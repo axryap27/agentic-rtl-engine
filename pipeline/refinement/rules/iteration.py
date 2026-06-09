@@ -16,7 +16,7 @@ class Iteration(RefinementRule):
 
     def is_applicable(self, spec: dict) -> bool:
         return any(
-            not a.get("clocked", False)
+            not a.get("clocked", False) and not a.get("combinational", False)
             for a in spec.get("actions", [])
             if a["name"] != spec.get("reset_action")
         )
@@ -28,6 +28,11 @@ class Iteration(RefinementRule):
 
         for action in result.get("actions", []):
             if action["name"] == action_name:
+                # Never clock a combinational action — it is continuous logic
+                # (an `assign`), not a register. A stray pick is a no-op (the
+                # engine's no-op guard then excludes it).
+                if action.get("combinational", False):
+                    return result
                 # Idempotent: re-applying Iteration to an already-clocked action
                 # must be a no-op. The guard re-wrapping below used to add one
                 # paren layer on EVERY call, so a picker that re-picked the same

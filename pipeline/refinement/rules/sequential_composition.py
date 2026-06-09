@@ -26,6 +26,7 @@ class SequentialComposition(RefinementRule):
             and not a.get("branches")
             for a in spec.get("actions", [])
             if a["name"] != spec.get("reset_action")
+            and not a.get("combinational", False)
         )
 
     def apply(self, spec: dict, params: dict) -> dict:
@@ -39,6 +40,15 @@ class SequentialComposition(RefinementRule):
 
         for action in result.get("actions", []):
             if action["name"] == action_name:
+                # Never decompose a combinational action — it is continuous logic
+                # (an `assign`), not a sequenced register update. is_applicable
+                # already excludes them, but it can return True on the strength of
+                # OTHER (register) actions, so a stray pick naming a combinational
+                # action by name would otherwise corrupt it here. Mirror the
+                # Iteration/Initialization apply()-side guard: a no-op the engine's
+                # no-op guard then excludes (a genuine mutation would slip past it).
+                if action.get("combinational", False):
+                    return result
                 # Carry the original guard into the first step if not supplied.
                 if steps and not steps[0].get("guard"):
                     steps[0]["guard"] = action.get("guard", "TRUE")

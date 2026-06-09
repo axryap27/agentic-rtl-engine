@@ -23,6 +23,7 @@ class Alternation(RefinementRule):
             not a.get("branches")
             for a in spec.get("actions", [])
             if a["name"] != spec.get("reset_action")
+            and not a.get("combinational", False)
         )
 
     def apply(self, spec: dict, params: dict) -> dict:
@@ -33,6 +34,17 @@ class Alternation(RefinementRule):
 
         for action in result.get("actions", []):
             if action["name"] == action_name:
+                # Never split a combinational action into branches — it is a
+                # continuous `assign`, not a mux of register updates. is_applicable
+                # excludes them, but it can return True on the strength of OTHER
+                # (register) actions, so a stray pick naming a combinational action
+                # would otherwise corrupt it into self-referential RTL (e.g.
+                # `assign full = (count==4) ? 1 : full`) that iverilog accepts.
+                # Mirror the Iteration/Initialization apply()-side guard: a no-op
+                # the engine then excludes (a genuine mutation would slip past the
+                # no-op guard).
+                if action.get("combinational", False):
+                    return result
                 action["branches"] = copy.deepcopy(branches)
                 # The flat `updates` list is only a FRAME summary (one entry per
                 # variable this action touches) used by is_rtl_style and by
