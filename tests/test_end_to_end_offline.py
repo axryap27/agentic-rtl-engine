@@ -77,16 +77,30 @@ _HAVE_COCOTB = shutil.which("cocotb-config") is not None and _HAVE_IVERILOG
 def _make_picker(sequence):
     """Build an applicability-driven, idempotent pick_rule from a (name,params) list.
 
-    Picks the FIRST sequence entry whose rule name is in the current applicable
-    set. Relies on each rule's is_applicable() going False after it fires, so the
-    same picker is safe across the multiple engine passes stage3 runs. Accepts
-    the `system_prompt` kwarg that stage3's pass-pick wrappers forward.
+    Picks the FIRST sequence entry whose rule name is applicable AND whose
+    application would actually CHANGE the spec. The no-op skip lets a sequence
+    contain two entries of the SAME rule with different params (e.g. a register
+    file's Iteration(Write) then Iteration(Read)): once Write is clocked, the
+    first Iteration entry becomes a no-op and the picker advances to the second
+    rather than re-picking it forever. Relies on rule.apply() purity (a no-op
+    returns a spec equal to its input). Accepts the `system_prompt` kwarg that
+    stage3's pass-pick wrappers forward.
     """
+    from pipeline.refinement.engine import RULE_REGISTRY
+    rule_by_name = {r.__class__.__name__: r for r in RULE_REGISTRY}
+
     def picker(applicable_rules, spec, *, system_prompt=None):
         names = {r["name"] for r in applicable_rules}
         for rule_name, params in sequence:
-            if rule_name in names:
-                return {"rule_name": rule_name, "params": params}
+            if rule_name not in names:
+                continue
+            rule = rule_by_name.get(rule_name)
+            try:
+                if rule is not None and rule.apply(spec, params) == spec:
+                    continue  # already applied — would be a no-op; advance
+            except Exception:
+                continue
+            return {"rule_name": rule_name, "params": params}
         # Fallback: should not be reached for these fixtures once the design is
         # RTL-style; pick the first applicable rule with empty params.
         return {"rule_name": applicable_rules[0]["name"], "params": {}}
@@ -440,6 +454,105 @@ def test_end_to_end_offline_accumulator_cocotb(tmp_path, monkeypatch):
     result = _run_real_cocotb(artifact_dir, "accumulator", inject_timescale=True)
     assert result.get("status") == "pass", (
         "Accumulator RTL failed cocotb (self-referential accumulate / active-low reset):\n"
+        f"phase={result.get('phase')} error={result.get('error')}\n"
+        f"{result.get('raw', '')[-2000:]}"
+    )
+
+
+# ===========================================================================
+# Fourth medium design — 8x8 register file (memory array + registered read)
+# ===========================================================================
+#
+# The register file is the first design with a MEMORY ARRAY: Compiler 2 must emit
+# `reg [7:0] mem [0:7]` (internal, never a port), a we-gated indexed write
+# (`mem[waddr] <= ...`), and a registered read (`rdata <= mem[raddr]`). The
+# refinement uses only existing Tier-1 rules — Initialization plus Iteration on
+# BOTH clocked ports — because the read is registered. A green cocotb run proves
+# the indexed write/read, the we-gate, read-before-write, and persistence are all
+# functionally correct through the REAL engine + Compiler 2.
+
+_RF_PROMPT = (
+    "Design an 8-word by 8-bit register file with a write-enabled synchronous "
+    "write port and a registered read port."
+)
+
+
+def test_end_to_end_offline_register_file_chain_completes(tmp_path, monkeypatch):
+    """Full graph on the register file: chain completes through Stage 3.
+
+    Asserts the 01/02/03 chain is all 'success', the RTL declares an internal
+    memory array, performs an indexed write and a registered read, and exposes a
+    purely scalar interface (mem is NOT a port).
+    """
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "register_file", _RF_PROMPT,
+    )
+
+    assert _status(artifact_dir, "01_summary.json") == "success"
+    assert _status(artifact_dir, "02_testbench_meta.json") == "success"
+    assert _status(artifact_dir, "02_formal_spec.json") == "success"
+    assert _status(artifact_dir, "03_rtl_output.json") == "success", (
+        "Stage 3 did not produce success RTL; "
+        f"03_rtl_output.json = {(artifact_dir / '03_rtl_output.json').read_text()[:500]}"
+    )
+
+    verilog = (artifact_dir / "output.v").read_text()
+    # Memory array (internal register), indexed write, registered read.
+    assert "reg  [7:0] mem [0:7];" in verilog
+    assert "mem[waddr] <=" in verilog
+    assert "rdata <= mem[raddr];" in verilog
+    assert "output reg [7:0] rdata" in verilog
+    assert "always @(posedge clk)" in verilog
+    # The memory is internal — it must never appear in the module port list.
+    header = verilog.split("(", 1)[1].split(");", 1)[0]
+    assert "mem" not in header, f"memory leaked into the port list:\n{header}"
+
+    # Port-direction gate coupling pin (a write/read/enable interface, all scalar):
+    # mem is internal so it is absent from the parsed header.
+    from pipeline.nodes.stage3 import _parse_module_port_directions
+    assert _parse_module_port_directions(verilog) == {
+        "clk": "input", "reset": "input", "we": "input",
+        "waddr": "input", "wdata": "input", "raddr": "input",
+        "rdata": "output",
+    }
+    try:
+        verify_banlist(verilog)
+    except BanlistViolation as exc:  # pragma: no cover - failure path
+        pytest.fail(f"Generated register-file RTL violates the banlist: {exc}")
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG, reason="iverilog not installed")
+def test_end_to_end_offline_register_file_lints_clean(tmp_path, monkeypatch):
+    """The graph-generated register-file Verilog lints clean under iverilog."""
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "register_file", _RF_PROMPT,
+    )
+    import subprocess
+    result = subprocess.run(
+        ["iverilog", "-Wall", "-t", "null", str(artifact_dir / "output.v")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated register-file RTL failed iverilog lint:\n"
+        f"{result.stdout}\n{result.stderr}\n\n{(artifact_dir / 'output.v').read_text()}"
+    )
+
+
+@pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
+def test_end_to_end_offline_register_file_cocotb(tmp_path, monkeypatch):
+    """Functional verification: the graph's register-file RTL PASSes cocotb.
+
+    The headline proof for this design class. The vectors exercise write,
+    registered-read latency, we-gating, persistence across cycles, read-before-
+    write, and overwrite. A PASS proves the memory array, the indexed write/read,
+    and the 3-bit address free-input widths (D2) are all functionally correct.
+    """
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "register_file", _RF_PROMPT,
+    )
+    result = _run_real_cocotb(artifact_dir, "register_file", inject_timescale=True)
+    assert result.get("status") == "pass", (
+        "Register-file RTL failed cocotb (memory array / registered read):\n"
         f"phase={result.get('phase')} error={result.get('error')}\n"
         f"{result.get('raw', '')[-2000:]}"
     )

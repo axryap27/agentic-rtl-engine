@@ -17,24 +17,26 @@ _Last updated: 2026-06-09._
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
 | Stage 4 — cocotb simulation (deterministic) | built |
 | Diagnoser — failure classification + routing | built |
-| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator; robust to a throwing/cycling live picker |
-| Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
+| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator, register file; robust to a throwing/cycling live picker |
+| Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** (`reg [w-1:0] mem [0:K-1]`, indexed read/write) |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **293 passed, 0 xfailed** |
+| Deterministic test suite | **316 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
-cocotb PASS offline** on three medium designs — a traffic-light FSM, a multi-op ALU, and
-an 8-bit accumulator — with every LLM boundary mocked, exercising the real engine, both
-compilers, and the cocotb runner.
+cocotb PASS offline** on four medium designs — a traffic-light FSM, a multi-op ALU, an
+8-bit accumulator, and an 8×8 register file — with every LLM boundary mocked, exercising
+the real engine, both compilers, and the cocotb runner.
 
 Live-confirmed design classes: the 2-bit counter (`885b9fc0a06b`), the traffic-light FSM
-(`15d3dd354b17`), the multi-op ALU, and — after a three-run debugging arc — the 8-bit
-accumulator, now a **clean, genuine live pass** (`121027-760bd3`, 2026-06-09). The
-accumulator's first run (`223427`) was a **false green** and its second (`114009`) halted
-safely on a refinement stall; both exposed real bugs, now fixed + regression-tested (see
-the accumulator sections below). The runs also **confirmed RC1's active-low reset path
-live** (`if (!rst_n)`), closing the gap the FSM run left open.
+(`15d3dd354b17`), the multi-op ALU, the 8-bit accumulator — after a three-run debugging
+arc, now a **clean, genuine live pass** (`121027-760bd3`, 2026-06-09) — and the 8×8
+**register file** (`155212-38cc17`, 2026-06-09), a **clean live pass on the first try**
+(the first design with a memory array). The accumulator's first run (`223427`) was a
+**false green** and its second (`114009`) halted safely on a refinement stall; both
+exposed real bugs, now fixed + regression-tested (see the accumulator sections below). The
+runs also **confirmed RC1's active-low reset path live** (`if (!rst_n)`), closing the gap
+the FSM run left open.
 
 ---
 
@@ -212,6 +214,42 @@ PASS end to end** — a genuine success, neither a false green nor a safe halt:
 
 The accumulator is now a clean, genuine live design class — the 4th (counter, FSM, ALU,
 accumulator). The full RC1–RC8 arc is validated against a live model.
+
+### Register file — CLEAN live pass, first try (run `155212-38cc17`, 2026-06-09)
+
+The **first design with a memory array** — an 8×8 register file — reaches **NL → cocotb
+PASS end to end on the first metered run, with zero retries**. The codegen was implemented
+as a **registered-read** register file: a purely scalar interface (`we/waddr/wdata/raddr →
+rdata`) over an internal `reg [7:0] mem [0:7]`, so the cocotb generator and `SpecSummary`
+needed no changes. The indexed write rides in the FormalSpec `updates` **key**
+(`{"mem[waddr]": "wdata"}`); `Variable` gained a `depth` field; refinement reuses **only
+the existing Tier-1 rules** (Initialization + Iteration on each clocked port — no new
+rule), so `pick_rule`'s bounded action space is unchanged. The single engine carve-out:
+a memory variable needs no reset value (memories are synthesis-canonically un-reset).
+
+The live run was genuine, not a false green:
+
+- **Live Agent 3** authored exactly the intended spec — `mem` as a `depth:8` variable, the
+  indexed write key `mem[waddr]:wdata`, a registered read `rdata:mem[raddr]`, and `mem`
+  omitted from `initial`/reset.
+- **Live `pick_rule`** converged `Iteration(write)` + `Iteration(read)` + `Initialization`
+  — it clocked **both** ports and reset only `rdata`, with no Alternation/SeqComp derail.
+- **Live Agent 1** produced a sophisticated, correct registered-read trace (12 vectors):
+  a cold read of an unwritten cell carries an **empty `expected`** (X-aware), reads come
+  back one cycle later (latency), v6 **reads-before-writes** (old value while overwriting),
+  and v11 reads a cell back **after a reset** (proving the memory survives reset while
+  `rdata` clears). 11 of 12 vectors carry real assertions.
+- **RC4 port gate passed for real** (`03_rtl_output: success`, no `port_direction_errors`);
+  `mem` is internal (never a port); the module lints clean under `iverilog -Wall`.
+
+Before the run, an ultracode adversarial review (5 lenses) hardened the feature with four
+deterministic fixes (suite 312→316) closing wasted-run paths a live LLM could take:
+(A) the memory index now survives **Alternation/SequentialComposition** composition (a
+picker that models the we-gate as a mux no longer derails to an uncompilable whole-array
+assignment that `is_rtl_style` wrongly accepts); (B) `parse_combinational` accepts an
+indexed LHS; (C) `Initialization.apply` never resets a memory; plus Agent 3 / Agent 1
+prompt sections for registered-read memories. The register file is the **5th clean live
+design class** and the first to exercise memory-array codegen end to end.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 

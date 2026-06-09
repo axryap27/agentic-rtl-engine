@@ -520,6 +520,171 @@ def accumulator_cocotb_trace() -> list[tuple[tuple[int, int], int]]:
 
 
 # ===========================================================================
+# Fixture 4 — 8x8 register file (memory array + registered read)
+# ===========================================================================
+#
+# A small register file: a memory array `mem` of 8 words x 8 bits with a
+# synchronous, write-enabled write port and a REGISTERED (1-cycle-latency) read
+# port. This is the first fixture with a MEMORY ARRAY (`reg [7:0] mem [0:7]`) —
+# a codegen capability no prior design exercises — and the first whose state is
+# indexed (mem[waddr] <= wdata; rdata <= mem[raddr]).
+#
+#   Write port:  on a rising edge, if we=1 then mem[waddr] <= wdata.
+#   Read  port:  rdata <= mem[raddr]  (registered: rdata one cycle behind raddr).
+#   Reset:       clears rdata to 0 (the memory itself is NOT reset — memories
+#                are synthesis-canonically un-reset; engine.is_rtl_style carves
+#                memory variables out of the reset_value requirement).
+#
+# WHY REGISTERED (not combinational) READ
+# ---------------------------------------
+# A registered read keeps BOTH ports clocked, so refinement is the SAME rule
+# sequence as every prior design — Initialization, then Iteration on each clocked
+# action — using only the existing Tier-1 rules (no new rule, no combinational
+# action). It also lets the read port reset (rdata <= 0), so the design has a
+# non-empty reset and a clean reset port. The cost is a 1-cycle read latency and
+# read-before-write semantics, both modelled exactly in _register_file_model.
+#
+# INDEXED WRITE ENCODING (load-bearing!)
+# --------------------------------------
+# A memory-element write rides in the FormalSpec transition's `updates` KEY:
+# `{"mem[waddr]": "wdata"}`. The bridge parses the `[index]` off the key into an
+# engine-spec update {"variable":"mem","index":"waddr","expression":"wdata"}; the
+# variable carries `depth` to mark it a memory. No new Transition field is needed.
+
+_RF_DEPTH = 8     # 8 words
+_RF_AW = 3        # 3-bit address (ceil log2 8)
+_RF_DW = 8        # 8-bit data
+
+
+def register_file_formal_spec() -> FormalSpec:
+    """FormalSpec for the 8x8 register file (the LLM-facing form).
+
+    `mem` is a memory array (depth=8); the Write transition targets one element
+    via the indexed update key `mem[waddr]`. `rdata` is a registered read of
+    `mem[raddr]`. Refinement adds reset (Initialization, clears rdata only) and
+    clocking (Iteration on BOTH Write and Read). `mem` is not reset/initialized.
+    """
+    return FormalSpec(
+        module_name="register_file",
+        description=(
+            "8-word x 8-bit register file. A synchronous write port writes "
+            "`wdata` into `mem[waddr]` when `we` is high; a registered read port "
+            "presents `mem[raddr]` on `rdata` one cycle later. Synchronous reset "
+            "clears `rdata` to 0; the memory contents are not reset."
+        ),
+        variables={
+            "mem":   {"type": "Nat", "width": _RF_DW, "depth": _RF_DEPTH},
+            "rdata": {"type": "Nat", "width": _RF_DW},
+        },
+        initial={"rdata": "0"},   # mem is a memory — left uninitialised
+        transitions=[
+            {
+                "label": "Write",
+                "condition": "we = 1",
+                "updates": {"mem[waddr]": "wdata"},
+            },
+            {
+                "label": "Read",
+                "condition": "TRUE",
+                "updates": {"rdata": "mem[raddr]"},
+            },
+        ],
+        invariants=["rdata \\in 0..255"],
+    )
+
+
+def register_file_summary() -> SpecSummary:
+    """SpecSummary (Stage-1 form) for the register file.
+
+    The interface is entirely SCALAR — clk, reset, we, waddr, wdata, raddr, rdata
+    — so the cocotb generator needs no array support; `mem` is internal. `waddr`
+    and `raddr` are declared 3-bit so the bridge sizes those free-input address
+    ports correctly (D2). Test vectors come from the registered-read reference
+    model (with its reset-offset and read-before-write semantics).
+    """
+    return SpecSummary(
+        module_name="register_file",
+        description="8x8 register file: we-gated sync write, registered read; sync reset clears rdata.",
+        ports=[
+            {"name": "clk", "direction": "input", "width": 1},
+            {"name": "reset", "direction": "input", "width": 1},
+            {"name": "we", "direction": "input", "width": 1},
+            {"name": "waddr", "direction": "input", "width": _RF_AW},
+            {"name": "wdata", "direction": "input", "width": _RF_DW},
+            {"name": "raddr", "direction": "input", "width": _RF_AW},
+            {"name": "rdata", "direction": "output", "width": _RF_DW},
+        ],
+        test_vectors=[
+            {"inputs": {"we": we, "waddr": waddr, "wdata": wdata, "raddr": raddr},
+             "expected": expected}
+            for (we, waddr, wdata, raddr), expected in register_file_cocotb_trace()
+        ],
+        reset_port="reset",
+        reset_active_low=False,
+    )
+
+
+def register_file_picker_sequence() -> list[tuple[str, dict]]:
+    """Applicability-driven rule sequence that drives the register file to RTL-style.
+
+    Initialization (reset clears rdata only — `mem` is a memory and is not reset),
+    then Iteration on EACH clocked action (Write and Read). Only existing Tier-1
+    rules: a registered read means both ports are clocked, so the sequence is the
+    same shape as every prior design (no new rule for memories).
+    """
+    return [
+        (
+            "Initialization",
+            {"reset_values": {"rdata": "0"}, "reset_action_name": "Reset"},
+        ),
+        ("Iteration", {"action_name": "Write"}),
+        ("Iteration", {"action_name": "Read"}),
+    ]
+
+
+# Per-cycle stimulus (we, waddr, wdata, raddr). v0 is a warm-up write whose read
+# is of an unwritten cell (X) and therefore carries no assertion.
+_RF_STIMULUS: list[tuple[int, int, int, int]] = [
+    (1, 1, 11, 1),   # v0: write mem[1]=11; read mem[1] (still X) -> warm-up
+    (1, 2, 22, 1),   # v1: write mem[2]=22; read mem[1]=11
+    (0, 2, 99, 2),   # v2: we=0 -> NO write (waddr/wdata ignored); read mem[2]=22
+    (1, 3, 33, 2),   # v3: write mem[3]=33; read mem[2]=22 (persistence)
+    (0, 0, 0, 3),    # v4: read mem[3]=33
+    (1, 1, 55, 1),   # v5: write mem[1]=55; read mem[1]=11 (read-BEFORE-write)
+    (0, 0, 0, 1),    # v6: read mem[1]=55 (overwrite visible next cycle)
+]
+
+
+def _register_file_model(
+    stimulus: list[tuple[int, int, int, int]],
+) -> list[tuple[tuple[int, int, int, int], dict]]:
+    """Registered-read reference model (matches the generated RTL exactly).
+
+    rdata is REGISTERED: rdata after edge i = mem[raddr_i] sampled BEFORE that
+    edge's write (read-before-write — both are nonblocking off the same edge).
+    The cocotb generator clocks one reset-deassert edge before vector 0 with all
+    inputs at 0, so no write happens before v0 and mem starts empty. A vector
+    whose read addresses a cell never written in a PRIOR cycle yields X, so it
+    carries an empty `expected` (the generator emits no assertion for it).
+    """
+    mask = (1 << _RF_DW) - 1
+    mem: dict[int, int] = {}            # addr -> value; absent = unwritten (X)
+    out: list[tuple[tuple[int, int, int, int], dict]] = []
+    for (we, waddr, wdata, raddr) in stimulus:
+        read_val = mem.get(raddr)        # sampled before this edge's write
+        if we:
+            mem[waddr] = wdata & mask     # write on this edge
+        expected: dict = {} if read_val is None else {"rdata": read_val}
+        out.append(((we, waddr, wdata, raddr), expected))
+    return out
+
+
+def register_file_cocotb_trace() -> list[tuple[tuple[int, int, int, int], dict]]:
+    """[((we,waddr,wdata,raddr), expected_dict), ...] for each cocotb vector."""
+    return _register_file_model(_RF_STIMULUS)
+
+
+# ===========================================================================
 # Registry — convenient iteration for parametrized tests
 # ===========================================================================
 
@@ -543,6 +708,13 @@ MEDIUM_DESIGNS: dict[str, dict] = {
         "summary": accumulator_summary,
         "picker_sequence": accumulator_picker_sequence,
         "cocotb_trace": accumulator_cocotb_trace,
+        "has_free_inputs": True,
+    },
+    "register_file": {
+        "formal_spec": register_file_formal_spec,
+        "summary": register_file_summary,
+        "picker_sequence": register_file_picker_sequence,
+        "cocotb_trace": register_file_cocotb_trace,
         "has_free_inputs": True,
     },
 }
