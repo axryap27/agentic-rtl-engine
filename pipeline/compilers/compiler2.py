@@ -578,6 +578,10 @@ class RTLTLACompiler:
         expr = re.sub(r"\bAND\b", "&&", expr)
         expr = re.sub(r"\bOR\b", "||", expr)
         expr = re.sub(r"\bNOT\b", "!", expr)
+        # Arithmetic word operator `mod` → `%` (defense-in-depth for hand-written
+        # TLA+ fed straight to Compiler 2; the bridge already folds it upstream).
+        # `%` is left untouched by the `=`→`==` pass below.
+        expr = re.sub(r"\bmod\b", "%", expr)
         # Logical operators
         expr = re.sub(r"/\\", "&&", expr)
         expr = re.sub(r"\\/", "||", expr)

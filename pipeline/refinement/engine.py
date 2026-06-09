@@ -31,6 +31,7 @@ from typing import Callable
 
 from .rules import TIER1_RULES
 from .rules.base import RefinementRule
+from .bridge import _is_identity_hold
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -63,7 +64,9 @@ def is_rtl_style(spec: dict) -> bool:
     2. Every variable has a concrete bounded type (not None / empty).
     3. Every variable has an explicit reset_value.
     4. There is an explicit reset_action named in spec["reset_action"].
-    5. Every non-reset action is clocked (action["clocked"] == True).
+    5. Every non-reset action is clocked (action["clocked"] == True),
+       EXCEPT a pure register-hold (every update is ``v' = v``) which emits
+       nothing distinct and so need not be separately clocked.
     6. Every non-reset action has at least one explicit update
        (action["updates"] is non-empty).
 
@@ -71,6 +74,11 @@ def is_rtl_style(spec: dict) -> bool:
     always @(posedge clk) block from UpdatePipeline conjuncts.
     Rule 3 guarantees the reset branch of that block is populated.
     Rules 1 & 2 guarantee every variable can become a Verilog signal.
+
+    The rule-5 carve-out for identity holds is what keeps convergence off the
+    Rule Picker's critical path: a spec with a dedicated Hold/idle transition
+    (e.g. an enable-gated register) is RTL-style once the *real* actions are
+    clocked, without the picker having to also iterate the redundant Hold.
 
     Note: a spec with zero variables or zero non-reset actions is NOT
     RTL-style — something must have been added first.
@@ -97,6 +105,14 @@ def is_rtl_style(spec: dict) -> bool:
             return False
 
     for action in non_reset_actions:
+        # A pure register-hold / idle action (every update is `v' = v`) emits
+        # nothing distinct — the register holds via the ELSE branch of its clocked
+        # driver — so it need not be separately clocked. Requiring it to be clocked
+        # was the root of a refinement stall: the engine could only reach RTL-style
+        # if the picker happened to Iterate a redundant Hold action. The bridge
+        # likewise drops such actions from CombinationalLogic (no double-drive).
+        if _is_identity_hold(action):
+            continue
         if not action.get("clocked", False):
             return False
         if not action.get("updates"):

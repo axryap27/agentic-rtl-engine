@@ -205,6 +205,10 @@ When generating or revising a FormalSpec:
   comparison words like "equals", "less than", or "greater than" — they are not
   parsed and will produce broken RTL. Boolean connectives may stay as AND/OR/NOT.
   Example: write `count < 3` and `count = 3`, never `count less than 3`.
+- For ARITHMETIC, also use symbolic operators: `%` for modulo (e.g.
+  `(acc + din) % 256`), `+ - * /` as usual. NEVER write the word `mod` — it is
+  not translated and produces broken RTL plus a phantom input port. Write
+  `(acc + din) % 256`, never `(acc + din) mod 256`.
 - Do NOT declare the clock or the reset signal as state variables. The clock is
   implicit (every clocked update happens on the rising edge) and the reset is
   handled by the pipeline. Model only the true state registers of the design;

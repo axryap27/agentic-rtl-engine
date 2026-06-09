@@ -91,17 +91,23 @@ _BOOL_WORD_SUBS: list[tuple["re.Pattern[str]", str]] = [
     (re.compile(r"\bAND\b"), "/\\\\"),   # AND -> /\
     (re.compile(r"\bOR\b"), "\\\\/"),    # OR  -> \/
     (re.compile(r"\bNOT\b"), "~"),       # NOT -> ~
+    # Arithmetic word operator: `mod` is not valid TLA+ (TLC modulo is `%`) and
+    # is not translated downstream, so it slips past Compiler-1/TLC and then both
+    # leaks a phantom `input mod` port (scanned as a free identifier) AND emits
+    # invalid Verilog `a mod b`. Fold it to `%` at the same boundary as AND/OR/NOT.
+    (re.compile(r"\bmod\b"), "%"),       # mod -> %
 ]
 
 
 def _translate_bool_words(expr: str) -> str:
-    """Replace English boolean operators AND/OR/NOT with TLA+ symbolic forms.
+    """Replace English word operators (AND/OR/NOT and the arithmetic `mod`) with
+    their TLA+ symbolic forms.
 
     Word-boundary anchored so identifiers containing these substrings (e.g.
-    ``ANDgate``, ``commander``) are not touched. Idempotent on already-symbolic
-    input. Pure. Comparison WORDS (``equals``/``less than``) are intentionally
-    NOT handled here — they are ambiguous to parse deterministically and are
-    instead prevented at the source by the Agent-3 prompt (FIX 3).
+    ``ANDgate``, ``commander``, ``modcount``) are not touched. Idempotent on
+    already-symbolic input. Pure. Comparison WORDS (``equals``/``less than``) are
+    intentionally NOT handled here — they are ambiguous to parse deterministically
+    and are instead prevented at the source by the Agent-3 prompt (FIX 3).
     """
     if not expr:
         return expr
@@ -122,6 +128,28 @@ def _scan_identifiers(expr: str) -> set[str]:
     for tok in _IDENT_RE.findall(expr or ""):
         found.add(tok[:-1] if tok.endswith("'") else tok)
     return found
+
+
+def _is_identity_hold(action: dict) -> bool:
+    """True iff *action* only holds its own registers — every update is ``v' = v``.
+
+    A pure register-hold / idle transition (e.g. a ``Hold`` action ``acc' = acc``)
+    emits nothing distinct in RTL: the register already holds via the ELSE branch
+    of its clocked driver. Such an action therefore (a) need NOT be separately
+    clocked for the spec to be RTL-style (see ``engine.is_rtl_style``), and (b)
+    must NOT be emitted as CombinationalLogic — doing so double-drives the register
+    (``MultiDriverError``). An action carrying ``branches`` / ``sequential_steps``
+    is real multi-way logic, never a pure hold. Pure and deterministic.
+    """
+    if action.get("branches") or action.get("sequential_steps"):
+        return False
+    updates = action.get("updates") or []
+    if not updates:
+        return False
+    return all(
+        str(u.get("expression", "")).strip() == str(u.get("variable", "")).strip()
+        for u in updates
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +749,14 @@ def engine_spec_to_rtl_tla(
             reset_action = action
         elif action.get("clocked", False):
             clocked_actions.append(action)
+        elif _is_identity_hold(action):
+            # A non-clocked pure register-hold (e.g. Hold: acc' = acc) emits nothing
+            # distinct — the register already holds via the ELSE branch of its
+            # clocked driver. Emitting it into CombinationalLogic would double-drive
+            # the register (MultiDriverError). Drop it. (engine.is_rtl_style likewise
+            # does not require such an action to be clocked, so the design converges
+            # even when the Rule Picker never iterates a dedicated Hold action.)
+            continue
         else:
             comb_actions.append(action)
 
