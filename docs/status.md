@@ -21,7 +21,7 @@ _Last updated: 2026-06-09._
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **289 passed, 0 xfailed** |
+| Deterministic test suite | **293 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
 cocotb PASS offline** on three medium designs — a traffic-light FSM, a multi-op ALU, and
@@ -161,10 +161,37 @@ regression tests in `tests/test_input_modeling_regression.py`:
   (never silently certifies). `pipeline/nodes/stage3.py`.
 - **RC5 — Agent 3 prompt (root cause).** Now forbids modelling data/control inputs as
   `variables`, with the `x -> x`-in-every-action litmus the bug exhibited.
-  `pipeline/agents/agent3.py`. Live confirmation rides a future run; the RC4 gate is the
-  deterministic backstop until then.
+  `pipeline/agents/agent3.py`. **Confirmed live** by run #2 below.
 - **RC6 — revise-replay.** See "Resolved — refinement-chain replay" below; it fired on
   this run.
+
+### Accumulator run #2 — RC5/RC4 confirmed live; identity-hold stall + `mod` fixed (run `114009-883d7e`, 2026-06-09)
+
+The same accumulator prompt re-run live did **not** false-green: **RC5 held** (Agent 3
+modelled only `acc` as a variable — `din`/`en` correctly free inputs) and **RC4 held** (it
+caught a degenerate module and halted at `partial` — no false green). The run instead
+exposed two NEW deterministic defects, diagnosed via an ultracode workflow (3 investigators
++ an adjudicator that corrected all three on the necessity of the *pair* fix) and fixed
+offline (suite 289 → 293, `tests/test_identity_hold_and_mod_regression.py`):
+
+- **RC7 — refinement stall on a pure register-hold (the trigger).** Agent 3 authored a
+  dedicated `Hold` action (`acc' = acc`). `is_rtl_style` required *every* non-reset action
+  to be clocked, but the live picker never iterated `Hold`, so the engine backtracked to
+  empty → stalled → fell back to abstract Compiler-1 TLA+ → Compiler 2 degenerated `acc`
+  into a bare `input` with an empty body. Fixed as a verified **pair** (each alone fails):
+  (1) `engine.is_rtl_style` skips identity-only holds (no longer requires them clocked);
+  (2) `bridge.engine_spec_to_rtl_tla` drops identity-only actions from CombinationalLogic
+  (else the un-iterated hold double-drives the register → `MultiDriverError`). Convergence
+  no longer depends on the picker iterating a redundant Hold.
+- **RC8 — `mod` word operator (latent, masked by the stall).** Agent 3 wrote
+  `(acc + din) mod 256`; `mod` is not valid TLA+ and was not translated, leaking a phantom
+  `input mod` port and invalid Verilog. Fixed by folding `mod` → `%` at the same
+  word-boundary as AND/OR/NOT (`bridge._translate_bool_words` + a defensive copy in
+  `compiler2._translate_basic`), plus an Agent 3 prompt nudge to use `%`.
+
+With RC7+RC8 the captured run-#2 spec compiles to a correct, iverilog-clean accumulator
+offline (`acc` as `output reg`, `din`/`en` inputs, `(acc + din) % 256`, enable-gated hold).
+A fresh live rerun would confirm it end to end; the deterministic spine is proven.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 
