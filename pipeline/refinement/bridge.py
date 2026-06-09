@@ -683,6 +683,16 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
     All variables start as abstract=True with no reset_value. The refinement
     rules add reset_value (Initialization), clocked (Iteration), etc.
     """
+    # A combinational transition (Transition.combinational) defines continuous
+    # logic — its target signals are wires, not registers. Collect their base
+    # names so the matching variables are born concrete (no Iteration needed) and
+    # carved out of the reset requirement, symmetric to a memory's depth carve-out.
+    comb_targets: set[str] = set()
+    for t in spec.transitions:
+        if getattr(t, "combinational", False):
+            for k in t.updates.keys():
+                comb_targets.add(_lhs_base(k))
+
     variables = [
         {
             "name": name,
@@ -695,7 +705,11 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             # (register file / RAM), emitted as `reg [w-1:0] name [0:depth-1]`,
             # never a port, and not reset (engine.is_rtl_style carve-out).
             "depth": getattr(var, "depth", None),
-            "abstract": True,
+            # A combinational output (driven only by a continuous `assign`) is a
+            # wire, not a register: born concrete (abstract=False, never Iterated),
+            # never reset. is_rtl_style honours both flags.
+            "combinational": name in comb_targets,
+            "abstract": name not in comb_targets,
             "reset_value": None,
             "clocked": False,
         }
@@ -717,6 +731,10 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             ],
             "is_rtl_style": False,
             "clocked": False,
+            # A combinational transition becomes CombinationalLogic (an `assign`),
+            # never a clocked register update. Iteration skips it; is_rtl_style
+            # accepts it unclocked.
+            "combinational": bool(getattr(t, "combinational", False)),
         }
         for t in spec.transitions
     ]
