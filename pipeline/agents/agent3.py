@@ -226,6 +226,29 @@ When generating or revising a FormalSpec:
   — it only ever holds its own value and is never computed from other state —
   then it is an input you wrongly promoted to a variable; remove it from
   "variables"/"initial"/"updates" and reference it as a free input instead.
+- For a MEMORY / register file / RAM (an addressable array of words), declare the
+  storage as a SINGLE variable with a "depth" field:
+    "mem": {"type": "Nat", "width": <word bits>, "depth": <number of words>}
+  This is an array of `depth` words, each `width` bits. To WRITE one element,
+  put the index INSIDE the update KEY in brackets:
+    a write transition's updates = {"mem[waddr]": "wdata"}   (write wdata to mem[waddr])
+  To READ one element, reference `mem[raddr]` in an update EXPRESSION, e.g. a
+  registered read port: {"rdata": "mem[raddr]"}. The addresses (`waddr`,
+  `raddr`), the write data (`wdata`), and the write-enable (`we`) are FREE INPUTS
+  — never list them under "variables". A memory is NOT reset and NOT initialised:
+  omit it from "initial", and do NOT give it a reset value or list it in the reset
+  transition (only its read-port register, e.g. `rdata`, resets). Model the write
+  and the read as SEPARATE transitions (a we-gated write `we = 1`, and an
+  unconditional read `TRUE`). The read port is a REGISTERED read (a clocked
+  register with one cycle of latency) — `rdata` is genuine clocked state, never a
+  combinational/continuous signal.
+- WHEN REFINING a register file (choosing rules): apply Iteration to BOTH the
+  write transition AND the read transition — both are clocked registers, so both
+  must be made clocked (the memory write and the read register `rdata` alike).
+  Keep a memory-element write as a SINGLE flat indexed update
+  (`{"mem[waddr]": "wdata"}`); do NOT split it with Alternation or
+  SequentialComposition (the we-gate rides inside the update, exactly like an
+  enable in any other register). Never put the memory in reset_values.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """

@@ -83,6 +83,21 @@ Rules:
   For a state machine or counter, this means the design advances by exactly one
   step per vector; write the "expected" sequence as the post-edge values for one
   step per vector (do NOT assume the design advances every other vector).
+- MEMORY / REGISTER FILE designs: if the design has an internal addressable
+  memory array (a register file or RAM), that array is INTERNAL storage, NOT a
+  port — do not list it in "ports" (only the address/data/enable inputs and the
+  read-data output are ports). A REGISTERED read port has ONE cycle of latency:
+  the read-data observed AFTER edge i reflects the memory cell at the read address
+  as sampled at edge i — i.e. it reflects writes from cycles strictly BEFORE i
+  (read-before-write: if you write and read the SAME address in the same vector,
+  the read output shows the OLD value that vector and the NEW value the NEXT
+  vector). The memory powers up UNINITIALISED and is NOT reset, so a read of any
+  address that was not written in a strictly-earlier vector is X (undefined): that
+  vector's "expected" dict MUST be EMPTY (do not assert the read output for an
+  uninitialised cell — this is the one case where an output is omitted from
+  "expected"). Begin with at least one warm-up write whose read targets an
+  as-yet-unwritten cell (empty "expected"), and only assert the read output once
+  it reads a cell written in an earlier vector.
 - Do NOT include explanatory text outside the JSON object.
 - Respond ONLY with the JSON object — no markdown, no commentary.
 """
