@@ -210,6 +210,18 @@ When generating or revising a FormalSpec:
   handled by the pipeline. Model only the true state registers of the design;
   reference the reset only inside a guard if needed, never as a "variables" entry
   or an "updates" target.
+- Do NOT declare DATA or CONTROL INPUTS as state variables either. An enable, a
+  mode/op select, a data-in bus, or ANY signal the environment drives INTO the
+  design is a FREE INPUT: reference it inside guards and update expressions, but
+  never list it under "variables" or "initial", and never make it an "updates"
+  target. Only signals the design itself registers and drives — its outputs and
+  genuine internal state — belong in "variables". A free input declared as a
+  variable is emitted as an `output reg`, so the design can never receive it
+  (e.g. an accumulator whose `din` becomes an output can never be fed data).
+  LITMUS TEST: if a signal's update in every action is just itself ("x" -> "x")
+  — it only ever holds its own value and is never computed from other state —
+  then it is an input you wrongly promoted to a variable; remove it from
+  "variables"/"initial"/"updates" and reference it as a free input instead.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """

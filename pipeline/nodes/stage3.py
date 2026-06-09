@@ -33,6 +33,7 @@ Writes: artifacts/<run_id>/02_formal_spec.json     (FormalSpec JSON)
 """
 
 import json
+import re
 import subprocess
 import tempfile
 import traceback
@@ -410,6 +411,86 @@ def _reset_active_low(artifact_dir: Path) -> bool:
         return False
 
 
+def _summary_port_directions(artifact_dir: Path) -> dict[str, str]:
+    """Best-effort {port_name: "input"|"output"} from 01_summary.json.
+
+    The spec-summary is the contract for the design's interface. The generated
+    module MUST honour it: a port the summary declares `input` has to be emitted
+    as an input, not an `output reg`. Returns {} on any error so the gate that
+    consumes this degrades to a no-op (never blocks a run on a read failure) —
+    same fail-soft posture as `_input_port_widths`/`_reset_port`.
+    """
+    try:
+        data = json.loads((artifact_dir / "01_summary.json").read_text())
+        if data.get("status") != "success":
+            return {}
+        summary = SpecSummary.model_validate(data)
+        return {p.name: p.direction for p in summary.ports}
+    except Exception:
+        return {}
+
+
+# Matches one Verilog-2001 port declaration: a direction keyword, an optional
+# net type (reg/wire), an optional [msb:lsb] width, then the port identifier.
+_PORT_DECL_RE = re.compile(
+    r"\b(input|output|inout)\b\s+(?:reg\s+|wire\s+)?(?:\[[^\]]*\]\s*)?(\w+)"
+)
+
+
+def _parse_module_port_directions(verilog: str) -> dict[str, str]:
+    """Parse {port_name: direction} from the emitted module's header.
+
+    Best-effort: isolates the parenthesised port list of the FIRST `module`
+    declaration and reads the direction keyword off each port line. Returns {}
+    if no module header is found, so the gate degrades to a no-op rather than
+    misfiring on unparseable input.
+    """
+    m = re.search(r"\bmodule\b\s+\w+\s*\((.*?)\)\s*;", verilog, re.DOTALL)
+    if not m:
+        return {}
+    dirs: dict[str, str] = {}
+    for decl in _PORT_DECL_RE.finditer(m.group(1)):
+        # First declaration of a name wins (a port is declared once in the header).
+        dirs.setdefault(decl.group(2), decl.group(1))
+    return dirs
+
+
+def _verify_port_directions(verilog: str, expected: dict[str, str]) -> list[str]:
+    """Return violations where the emitted module's port directions disagree
+    with the spec-summary's declared directions.
+
+    This is the deterministic gate for the canonical false-green: Agent 3 wrongly
+    models a data/control INPUT (e.g. `din`, `en`) as a state variable, so the
+    reverse bridge emits it as `output reg`. The design then has no way to receive
+    that input, yet cocotb — which force-drives the mis-declared output net — still
+    PASSES, reporting success on a structurally wrong interface. Comparing the
+    emitted ports against the summary turns that silent pass into an honest fault.
+
+    Fail-soft: an empty `expected` (summary unreadable) or an unparseable module
+    header yields no violations — the gate never blocks a run it cannot assess.
+    """
+    if not expected:
+        return []
+    actual = _parse_module_port_directions(verilog)
+    if not actual:
+        return []
+    violations: list[str] = []
+    for name, want in sorted(expected.items()):
+        got = actual.get(name)
+        if got is None:
+            violations.append(
+                f"port '{name}' is declared '{want}' in the spec summary but is "
+                f"absent from the generated module interface"
+            )
+        elif got != want:
+            violations.append(
+                f"port '{name}' is '{want}' in the spec summary but the generated "
+                f"module declares it '{got}' (a data/control input was likely "
+                f"modelled as a state variable)"
+            )
+    return violations
+
+
 def _run_stage3_from_spec(
     state: PipelineState,
     spec: FormalSpec,
@@ -601,6 +682,31 @@ def _run_stage3_from_spec(
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
+
+        # ---- Port-direction contract gate ----
+        # Convert the silent false-green — a data/control input wrongly modelled
+        # as a state variable, emitted as `output reg`, yet passing cocotb because
+        # the sim force-drives the net — into an honest, non-success artifact so
+        # the router does not advance a structurally wrong interface.
+        port_violations = _verify_port_directions(
+            verilog, _summary_port_directions(artifact_dir)
+        )
+        if port_violations:
+            write_artifact(rtl_path, {
+                "status":       "partial",
+                "module_name":  spec.module_name,
+                "verilog_path": str(verilog_file),
+                "verilog":      verilog,
+                "error": (
+                    "Generated module interface does not match the spec summary's "
+                    "declared port directions (a data/control input was likely "
+                    "modelled as a state variable, so it was emitted as `output reg` "
+                    "and the design cannot receive it): " + "; ".join(port_violations)
+                ),
+                "port_direction_errors": port_violations,
+            })
+            return state
+
         # G07: only 'success' when refinement actually ran. If we fell back to
         # the unrefined tla_source, the RTL is from the abstract spec → 'partial'.
         rtl_artifact = {
@@ -735,6 +841,24 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
     except Exception as exc:
         _write_error(rtl_path, f"revise_on_cocotb failed: {exc}\n{traceback.format_exc()}")
         return state
+
+    # Revise-replay fix: the spec has been re-authored from scratch, so the
+    # existing refinement_chain.json — built against the OLD initial spec — must
+    # NOT be appended onto. engine.run() treats an existing chain as an immutable
+    # replayable prefix (committed_prefix = _load_chain(run_id)); a revised spec's
+    # steps are relative to the NEW initial spec, so appending produces a chain
+    # whose prefix→suffix hashes are discontinuous and that no longer replays from
+    # the initial spec. Preserve the stale chain for debugging, then clear it so
+    # the engine writes a fresh, self-contained, replayable chain against the
+    # revised spec. (Contrast the backtrack path, which truncates a PARTIAL prefix
+    # because its spec is UNCHANGED; a revise discards the WHOLE prefix because the
+    # spec changed.)
+    chain_path = artifact_dir / "refinement_chain.json"
+    if chain_path.exists():
+        (artifact_dir / "refinement_chain_pre_revise.json").write_text(
+            chain_path.read_text()
+        )
+        chain_path.write_text("[]")
 
     # Hand off to the shared pipeline — BUG-2 FIX: we pass the revised spec
     # directly instead of calling run_stage3() which would re-generate from scratch.
@@ -885,6 +1009,25 @@ update expressions that differ from the choices that led to the failure.
         verilog = compiler.compile(module_name=spec.module_name)
         verilog_file = artifact_dir / "output.v"
         verilog_file.write_text(verilog)
+
+        # Port-direction contract gate (defense in depth; see _run_stage3_from_spec).
+        port_violations = _verify_port_directions(
+            verilog, _summary_port_directions(artifact_dir)
+        )
+        if port_violations:
+            write_artifact(rtl_path, {
+                "status":       "partial",
+                "module_name":  spec.module_name,
+                "verilog_path": str(verilog_file),
+                "verilog":      verilog,
+                "error": (
+                    "Generated module interface does not match the spec summary's "
+                    "declared port directions: " + "; ".join(port_violations)
+                ),
+                "port_direction_errors": port_violations,
+            })
+            return state
+
         write_artifact(rtl_path, {
             "status":       "success",
             "module_name":  spec.module_name,
