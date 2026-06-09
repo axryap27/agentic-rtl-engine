@@ -153,6 +153,80 @@ def _is_identity_hold(action: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Memory-element (register-file) writes
+# ---------------------------------------------------------------------------
+# A register-file / RAM write targets ONE element of a memory array, e.g.
+# ``mem[waddr] <= wdata``. The engine-spec update carries an optional ``index``
+# field: {"variable": "mem", "index": "waddr", "expression": "wdata"}. The LHS
+# then renders as ``mem[waddr]`` for the RTL path (Compiler 2 emits a Verilog
+# indexed assignment) while the base name ``mem`` is what is classified and
+# declared. A scalar update has no ``index`` and renders as the bare variable.
+
+#: An LHS of the form ``base[index]`` (a memory element). The base is a declared
+#: array variable; the bracketed text is the (possibly compound) index expr.
+#: Whitespace around / inside the brackets is tolerated so a key written
+#: ``"mem [waddr]"`` parses identically here and in Compiler 1 (which uses the
+#: same shape) — a divergence otherwise drops the write on one path but not the
+#: other.
+_INDEXED_LHS_RE = re.compile(r"^([A-Za-z_]\w*)\s*\[\s*(.+?)\s*\]$")
+
+
+def _update_lhs(upd: dict) -> str:
+    """Left-hand side of an update: ``mem[waddr]`` if indexed, else the var name.
+
+    Pure. The index is spliced verbatim (it is an identifier or simple expr the
+    free-input scanner already understands). Used so a memory-element write flows
+    through the same composition machinery as a scalar update, keyed on the full
+    indexed LHS so two actions writing different elements never collide.
+    """
+    var = upd.get("variable", "")
+    index = upd.get("index")
+    return f"{var}[{index}]" if index not in (None, "") else var
+
+
+def _lhs_base(lhs: str) -> str:
+    """Base variable of a (possibly indexed) LHS: ``mem[waddr]`` -> ``mem``."""
+    m = _INDEXED_LHS_RE.match(lhs.strip())
+    return m.group(1) if m else lhs.strip()
+
+
+def _tla_primed_update(lhs: str, expr: str) -> str:
+    """Render one update as a VALID TLA+ primed conjunct (abstract-TLC path).
+
+    Scalar ``v``      -> ``v' = expr``.
+    Indexed ``mem[i]`` -> ``mem' = [mem EXCEPT ![i] = expr]`` (``mem[i]' = e`` is
+    not legal TLA+; the function-update form is). Pure. The RTL path instead
+    emits ``mem[i]' = expr`` verbatim, which Compiler 2 turns into a Verilog
+    indexed assignment — only the abstract model-checking text needs EXCEPT.
+    """
+    m = _INDEXED_LHS_RE.match(lhs.strip())
+    if m:
+        base, index = m.group(1), m.group(2)
+        return f"{base}' = [{base} EXCEPT ![{index}] = {expr}]"
+    return f"{lhs}' = {expr}"
+
+
+def _build_update(key: str, value: str) -> dict:
+    """Build one engine-spec update dict from a FormalSpec (key, value) pair.
+
+    Scalar key ``"rdata"`` -> {"variable": "rdata", "expression": <value>}.
+    Indexed key ``"mem[waddr]"`` (a register-file write) ->
+        {"variable": "mem", "index": "waddr", "expression": <value>}.
+    Word operators (AND/OR/NOT/mod) are folded to symbolic form in BOTH the index
+    and the value, matching every other expression on the RTL path. Pure.
+    """
+    expr = _translate_bool_words(value)
+    m = _INDEXED_LHS_RE.match(key.strip())
+    if m:
+        return {
+            "variable": m.group(1),
+            "index": _translate_bool_words(m.group(2)),
+            "expression": expr,
+        }
+    return {"variable": key.strip(), "expression": expr}
+
+
+# ---------------------------------------------------------------------------
 # Multi-branch / multi-step update composition (G12)
 # ---------------------------------------------------------------------------
 # The Alternation rule stores its mutually-exclusive guarded branches on
@@ -214,13 +288,20 @@ def _nested_if(clauses: list[tuple[str, str]], default: str) -> str:
 
 
 def _ordered_assigned_vars(groups: list[list[dict]]) -> list[str]:
-    """First-seen-ordered list of variables assigned across *groups* of updates."""
+    """First-seen-ordered list of assignment LHSs across *groups* of updates.
+
+    Keys on the FULL LHS via _update_lhs so a memory-element write keeps its index
+    (``mem[waddr]``) through Alternation/SequentialComposition composition — two
+    branches writing the same element compose into one driver, while writes to
+    different elements stay distinct. Identity for a scalar update (no index), so
+    every existing branch/step design is unchanged.
+    """
     order: list[str] = []
     seen: set[str] = set()
     for group in groups:
         for upd in group:
-            v = upd.get("variable")
-            if v is not None and v not in seen:
+            v = _update_lhs(upd)
+            if v and v not in seen:
                 seen.add(v)
                 order.append(v)
     return order
@@ -245,9 +326,12 @@ def _alternation_exprs(action: dict) -> list[tuple[str, str]]:
         for branch in branches:
             guard = branch.get("guard", "TRUE") or "TRUE"
             for upd in branch.get("updates", []):
-                if upd.get("variable") == var:
+                # Match on the FULL LHS so a memory-element write (mem[waddr])
+                # composes under its indexed key, not the bare array name.
+                if _update_lhs(upd) == var:
                     clauses.append((guard, upd["expression"]))
                     break
+        # default = var: an un-guarded cycle holds the (possibly indexed) target.
         result.append((var, _nested_if(clauses, var)))
     return result
 
@@ -283,8 +367,10 @@ def _sequential_exprs(action: dict) -> list[tuple[str, str]]:
     for step in steps:
         guard = step.get("guard", "TRUE") or "TRUE"
         for upd in step.get("updates", []):
-            var = upd.get("variable")
-            if var is None:
+            # Key on the FULL LHS so a memory-element write keeps its index
+            # through sequential composition (identity for a scalar update).
+            var = _update_lhs(upd)
+            if not var:
                 continue
             # Substitute earlier-step results into this step's RHS so later
             # steps observe the freshly-computed intra-cycle values.
@@ -315,8 +401,11 @@ def _action_update_exprs(action: dict) -> list[tuple[str, str]]:
         return _alternation_exprs(action)
     if action.get("sequential_steps"):
         return _sequential_exprs(action)
+    # Flat updates. Render the LHS with its memory index when present so a
+    # register-file write (mem[waddr]) flows through composition/emit keyed on
+    # the full element, holding via ELSE <mem[waddr]> exactly like a scalar reg.
     return [
-        (upd["variable"], upd["expression"])
+        (_update_lhs(upd), upd["expression"])
         for upd in action.get("updates", [])
     ]
 
@@ -353,9 +442,16 @@ def _free_inputs(engine_spec: dict, declared: set[str]) -> list[str]:
             exprs.append(action.get("guard", "") or "")
         # Use the branch-/step-composed RHS so identifiers that appear only
         # inside an Alternation branch or a SequentialComposition step (and not
-        # in the flat updates list) are still detected as free inputs (G12).
-        for _var, expr in _action_update_exprs(action):
+        # in the flat updates list) are still detected as free inputs (G12). Also
+        # scan the composed LHS: a memory-element write's address lives in the LHS
+        # (mem[waddr]), NOT in its RHS (which is just `wdata`). Because every
+        # composition path now keys the LHS via _update_lhs, scanning it recovers
+        # the write address (`waddr`) regardless of whether the write is a flat
+        # update, an Alternation branch, or a SequentialComposition step — the
+        # declared base array (`mem`) is filtered out below, leaving the index.
+        for lhs, expr in _action_update_exprs(action):
             exprs.append(expr or "")
+            exprs.append(lhs or "")
         for expr in exprs:
             for ident in _scan_identifiers(expr):
                 if ident in declared or ident in _RESERVED_IDENTIFIERS:
@@ -595,6 +691,10 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             # emitter (engine_spec_to_rtl_tla → Compiler 2) can size the signal.
             # Without this, multi-bit signals silently truncate to 1 bit (BUG-17).
             "width": var.width,
+            # Carry the memory depth: a variable with depth set is an array
+            # (register file / RAM), emitted as `reg [w-1:0] name [0:depth-1]`,
+            # never a port, and not reset (engine.is_rtl_style carve-out).
+            "depth": getattr(var, "depth", None),
             "abstract": True,
             "reset_value": None,
             "clocked": False,
@@ -612,7 +712,7 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             "name": t.label,
             "guard": _translate_bool_words(t.condition),
             "updates": [
-                {"variable": k, "expression": _translate_bool_words(v)}
+                _build_update(k, v)
                 for k, v in t.updates.items()
             ],
             "is_rtl_style": False,
@@ -708,8 +808,8 @@ def engine_spec_to_rtl_tla(
     # and is stripped by Compiler 2 after the width is captured. clk and reset
     # are always single-bit. Missing/zero width defaults to 1.
     sized_vars = [
-        (v["name"], int(v.get("width") or 1)) for v in variables
-    ] + [("clk", 1), (reset_port, 1)]
+        (v["name"], int(v.get("width") or 1), v.get("depth")) for v in variables
+    ] + [("clk", 1, None), (reset_port, 1, None)]
 
     # Free inputs (BUG-18): identifiers used in guards/update expressions that
     # are NOT declared variables, clk/reset, or TLA+ keywords. Without this they
@@ -720,17 +820,21 @@ def engine_spec_to_rtl_tla(
     # inputs. Each free input is sized via _free_input_width (D2): a Stage-1
     # SpecSummary port hint, else inference from a register it directly feeds,
     # else 1. Sorted (by _free_inputs) for deterministic output.
-    declared = {name for name, _ in sized_vars}
+    declared = {name for name, *_ in sized_vars}
     free_inputs = _free_inputs(engine_spec, declared)
     sized_vars += [
-        (name, _free_input_width(name, engine_spec, port_widths))
+        (name, _free_input_width(name, engine_spec, port_widths), None)
         for name in free_inputs
     ]
 
     lines.append("VARIABLES")
-    for i, (name, width) in enumerate(sized_vars):
+    for i, (name, width, depth) in enumerate(sized_vars):
         comma = "," if i < len(sized_vars) - 1 else ""
-        lines.append(f"    {name}{comma}  \\* width: {width}")
+        # A memory array carries its depth in the same comment channel as width
+        # (BUG-17): "\* width: W depth: K". Compiler 2 reads both and emits
+        # `reg [W-1:0] name [0:K-1]`. Scalars omit the depth note (depth None).
+        depth_note = f" depth: {depth}" if depth else ""
+        lines.append(f"    {name}{comma}  \\* width: {width}{depth_note}")
     lines.append("")
 
     # Init (emitted for completeness; Compiler 2 ignores it)
@@ -856,13 +960,16 @@ def engine_spec_to_abstract_tla(engine_spec: dict, module_name: str) -> tuple[st
         # action updates each shared variable with one composed expression, not
         # the first-wins flat update — so TLC checks the real next-state too.
         composed = _action_update_exprs(action)
-        updated_vars = {var for var, _ in composed}
+        # A memory-element write's LHS is `mem[waddr]`; UNCHANGED must list the
+        # BASE array name, and the conjunct must use the TLA+ EXCEPT form
+        # (`mem[i]' = e` is illegal). _tla_primed_update / _lhs_base handle both.
+        updated_vars = {_lhs_base(var) for var, _ in composed}
         unchanged = [v for v in var_names if v not in updated_vars]
 
         lines.append(f"{aname} ==")
         lines.append(f"    /\\ {guard}")
         for var, expr in composed:
-            lines.append(f"    /\\ {var}' = {expr}")
+            lines.append(f"    /\\ {_tla_primed_update(var, expr)}")
         if unchanged:
             lines.append(f"    /\\ UNCHANGED <<{', '.join(unchanged)}>>")
         lines.append("")

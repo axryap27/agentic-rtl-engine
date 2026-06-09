@@ -21,7 +21,13 @@ class Initialization(RefinementRule):
         variables = spec.get("variables", [])
         if not variables:
             return False
-        has_unreset_var = any(v.get("reset_value") is None for v in variables)
+        # A memory array (depth set) is a register file / RAM and is never reset
+        # (see engine.is_rtl_style). Its missing reset_value must NOT keep
+        # Initialization applicable, or the rule would fire forever on any design
+        # containing a memory (every re-pick a no-op → strikes → stall).
+        has_unreset_var = any(
+            v.get("reset_value") is None and not v.get("depth") for v in variables
+        )
         has_reset_action = spec.get("reset_action") is not None
         return has_unreset_var or not has_reset_action
 
@@ -31,13 +37,22 @@ class Initialization(RefinementRule):
 
         result = copy.deepcopy(spec)
 
+        # A memory array (depth set) is never reset (see is_applicable above and
+        # engine.is_rtl_style). Resetting it would emit an illegal whole-array
+        # `mem <= 0` that iverilog rejects — and there is no codegen-time lint gate
+        # to catch it before Stage 4. Drop any memory name the caller put in
+        # reset_values so a stray pick can never produce that: the rule resets
+        # scalar registers only.
+        mem_names = {v["name"] for v in result.get("variables", []) if v.get("depth")}
+
         for var in result["variables"]:
-            if var["name"] in reset_values:
+            if var["name"] in reset_values and var["name"] not in mem_names:
                 var["reset_value"] = reset_values[var["name"]]
 
         reset_updates = [
             {"variable": name, "expression": expr}
             for name, expr in reset_values.items()
+            if name not in mem_names
         ]
         reset_action = {
             "name": action_name,
@@ -57,7 +72,8 @@ class Initialization(RefinementRule):
     def describe(self) -> str:
         return (
             "Initialization: add a synchronous reset action and assign a "
-            "concrete initial value to every variable. "
+            "concrete initial value to every NON-MEMORY variable (a memory / "
+            "register file is not reset — omit it from reset_values). "
             "Params: reset_values (dict variable->expression), "
             "reset_action_name (str, default 'Reset')."
         )

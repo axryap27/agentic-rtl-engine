@@ -101,6 +101,15 @@ def is_rtl_style(spec: dict) -> bool:
             return False
         if not var.get("type"):
             return False
+        # A memory array (depth set) is a register file / RAM. Synthesis-canonical
+        # memories carry NO reset — an all-element reset does not infer block RAM
+        # and is rarely intended — so a memory is concrete once it is in a clock
+        # domain (Iteration sets abstract=False) and needs no reset_value. The
+        # reverse bridge likewise emits no reset conjunct for it. (Mirrors the
+        # rule-5 identity-hold carve-out below: a structural exception, not a relax
+        # of the invariant for ordinary registers, which still must reset.)
+        if var.get("depth"):
+            continue
         if var.get("reset_value") is None:
             return False
 
