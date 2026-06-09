@@ -185,7 +185,9 @@ Your knowledge base:
         {
           "label": str,
           "condition": str,       // plain English: AND, OR, NOT
-          "updates": {"<name>": "<next-value expression>"}
+          "updates": {"<name>": "<next-value expression>"},
+          "combinational": bool   // optional, default false; true = a CONTINUOUS
+                                  // assign (wire), not a clocked register update
         }
       ],
       "invariants": [str]
@@ -249,6 +251,38 @@ When generating or revising a FormalSpec:
   (`{"mem[waddr]": "wdata"}`); do NOT split it with Alternation or
   SequentialComposition (the we-gate rides inside the update, exactly like an
   enable in any other register). Never put the memory in reset_values.
+- COMBINATIONAL OUTPUTS. An output that must reflect CURRENT-cycle state with NO
+  clock latency — a FIFO `full`/`empty` flag, a comparator result, a decoder
+  output, a derived valid/ready — is a CONTINUOUS ASSIGNMENT (a wire), not a
+  register. Put it in its OWN transition marked `"combinational": true` with
+  `"condition": "TRUE"`, e.g.
+    {"label": "Flags", "condition": "TRUE", "combinational": true,
+     "updates": {"full": "count = 4", "empty": "count = 0"}}
+  A combinational target is a WIRE: never list it in "initial", never give it a
+  reset value or list it in the reset transition, and NEVER apply Iteration,
+  Alternation, or SequentialComposition to a combinational transition. A
+  REGISTERED output (one cycle of latency, e.g. a FIFO `dout`) stays an ordinary
+  clocked transition. If a flag that should be combinational is left as an
+  ordinary (clocked) output it silently lags by a cycle and the design fails
+  verification — so mark every such flag `"combinational": true`.
+- MULTI-WAY NEXT-STATE. Express any multi-way next value (e.g. an occupancy
+  counter) as ONE FLAT else-if priority chain:
+    IF g1 THEN e1 ELSE IF g2 THEN e2 ELSE <hold>
+  with compound AND guards. NEVER write a mid-expression conditional such as
+  `count + (IF wr THEN 1 ELSE 0) - (IF rd THEN 1 ELSE 0)`, and NEVER nest an IF
+  inside a THEN branch — the compiler only translates an IF in the leading/ELSE
+  position and leaks an embedded IF as broken RTL. Put every branch in the ELSE
+  chain instead.
+- FIFO RECIPE (a register file plus flow control): a we-gated write
+  `{"mem[wptr]": "din", "wptr": "(wptr + 1) % DEPTH"}` guarded `wr_en = 1 AND
+  full = 0`; a registered read `{"dout": "mem[rptr]", "rptr": "(rptr + 1) %
+  DEPTH"}` guarded `rd_en = 1 AND empty = 0`; an occupancy `count` updated by a
+  flat else-if chain (simultaneous read+write holds count, write-only +1,
+  read-only -1, else hold); a COMBINATIONAL Flags transition for `full`
+  (`count = DEPTH`) and `empty` (`count = 0`). Reset clears wptr/rptr/count/dout
+  but NOT the memory and NOT the flags. When refining, apply Iteration to the
+  write, read, and counter transitions; leave the combinational Flags transition
+  alone.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """

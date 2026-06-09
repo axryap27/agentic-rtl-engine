@@ -98,6 +98,16 @@ Rules:
   "expected"). Begin with at least one warm-up write whose read targets an
   as-yet-unwritten cell (empty "expected"), and only assert the read output once
   it reads a cell written in an earlier vector.
+- FIFO / FLOW-CONTROL designs: for a FIFO or queue with full/empty back-pressure,
+  (1) a write while full (wr_en=1 and full=1) is DROPPED — occupancy and the read
+  data are unchanged; a read while empty (rd_en=1 and empty=1) returns no new data
+  and occupancy is unchanged. (2) full and empty are COMBINATIONAL functions of
+  occupancy: expect them at the value AFTER this vector's edge updates the count
+  (the post-edge occupancy), not the pre-edge value. (3) a simultaneous read AND
+  write (both enables high, not full, not empty) HOLDS the occupancy count
+  unchanged. (4) the read-data output is a REGISTERED read with one cycle of
+  latency (read-before-write: a value written this vector appears on the read-data
+  output only on a later read vector). Write the "expected" sequence accordingly.
 - Do NOT include explanatory text outside the JSON object.
 - Respond ONLY with the JSON object — no markdown, no commentary.
 """
