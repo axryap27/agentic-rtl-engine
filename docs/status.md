@@ -29,11 +29,12 @@ an 8-bit accumulator — with every LLM boundary mocked, exercising the real eng
 compilers, and the cocotb runner.
 
 Live-confirmed design classes: the 2-bit counter (`885b9fc0a06b`), the traffic-light FSM
-(`15d3dd354b17`), and the multi-op ALU. The 8-bit accumulator (`223427-d7a921`,
-2026-06-09) reached cocotb PASS live too, but it was a **false green** that exposed two
-real bugs — both now fixed and regression-tested (see "Accumulator — false green" below).
-That run also **confirmed RC1's active-low reset path live** (`if (!rst_n)`), closing the
-gap the FSM run left open.
+(`15d3dd354b17`), the multi-op ALU, and — after a three-run debugging arc — the 8-bit
+accumulator, now a **clean, genuine live pass** (`121027-760bd3`, 2026-06-09). The
+accumulator's first run (`223427`) was a **false green** and its second (`114009`) halted
+safely on a refinement stall; both exposed real bugs, now fixed + regression-tested (see
+the accumulator sections below). The runs also **confirmed RC1's active-low reset path
+live** (`if (!rst_n)`), closing the gap the FSM run left open.
 
 ---
 
@@ -191,7 +192,26 @@ offline (suite 289 → 293, `tests/test_identity_hold_and_mod_regression.py`):
 
 With RC7+RC8 the captured run-#2 spec compiles to a correct, iverilog-clean accumulator
 offline (`acc` as `output reg`, `din`/`en` inputs, `(acc + din) % 256`, enable-gated hold).
-A fresh live rerun would confirm it end to end; the deterministic spine is proven.
+
+### Accumulator run #3 — CLEAN live pass; RC5/RC7 confirmed live (run `121027-760bd3`, 2026-06-09)
+
+The same prompt, re-run live against the committed RC7+RC8 fixes, reaches **NL → cocotb
+PASS end to end** — a genuine success, neither a false green nor a safe halt:
+
+- **RC7 confirmed live.** Agent 3 again authored a dedicated `Hold` action (`acc' = acc`);
+  only `Accumulate` was clocked, yet the engine converged in **2 clean replayable steps**
+  (`Initialization` + `Iteration`, just 2 pick attempts, no cycling — contrast run #2's 11)
+  with no stall and no `MultiDriverError`. The identity-hold relaxation took the Rule Picker
+  off the convergence-critical path.
+- **RC5 held** (`variables: ['acc']` only); **RC8 held** (Agent 3 wrote `% 256` — the prompt
+  nudge; the deterministic translation stayed the unused backstop); **RC4 passed**
+  (`03_rtl_output: success`, not `partial` → interface verified, not a false green); **RC1**
+  emitted `if (!rst_n)`.
+- cocotb passed **13 real `acc` assertions** (`0, 10, 30, 60, 60(hold)…`); the emitted module
+  is a correct 8-bit accumulator (`acc` an `output reg [7:0]`, `din`/`en` inputs).
+
+The accumulator is now a clean, genuine live design class — the 4th (counter, FSM, ALU,
+accumulator). The full RC1–RC8 arc is validated against a live model.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 
