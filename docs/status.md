@@ -17,16 +17,16 @@ _Last updated: 2026-06-09._
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
 | Stage 4 — cocotb simulation (deterministic) | built |
 | Diagnoser — failure classification + routing | built |
-| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator, register file; robust to a throwing/cycling live picker |
-| Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** (`reg [w-1:0] mem [0:K-1]`, indexed read/write) |
+| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator, register file, FIFO; robust to a throwing/cycling live picker |
+| Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** (`reg [w-1:0] mem [0:K-1]`, indexed read/write) and **combinational outputs** (`assign`-driven wires, e.g. FIFO flags) |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **316 passed, 0 xfailed** |
+| Deterministic test suite | **331 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
-cocotb PASS offline** on four medium designs — a traffic-light FSM, a multi-op ALU, an
-8-bit accumulator, and an 8×8 register file — with every LLM boundary mocked, exercising
-the real engine, both compilers, and the cocotb runner.
+cocotb PASS offline** on five medium designs — a traffic-light FSM, a multi-op ALU, an
+8-bit accumulator, an 8×8 register file, and a 4-deep FIFO — with every LLM boundary
+mocked, exercising the real engine, both compilers, and the cocotb runner.
 
 Live-confirmed design classes: the 2-bit counter (`885b9fc0a06b`), the traffic-light FSM
 (`15d3dd354b17`), the multi-op ALU, the 8-bit accumulator — after a three-run debugging
@@ -37,6 +37,9 @@ arc, now a **clean, genuine live pass** (`121027-760bd3`, 2026-06-09) — and th
 exposed real bugs, now fixed + regression-tested (see the accumulator sections below). The
 runs also **confirmed RC1's active-low reset path live** (`if (!rst_n)`), closing the gap
 the FSM run left open.
+
+The 4-deep **FIFO** (the first design with a **combinational output**) is **offline-proven
+and review-hardened** but **not yet confirmed on a live model** — see its section below.
 
 ---
 
@@ -250,6 +253,40 @@ assignment that `is_rtl_style` wrongly accepts); (B) `parse_combinational` accep
 indexed LHS; (C) `Initialization.apply` never resets a memory; plus Agent 3 / Agent 1
 prompt sections for registered-read memories. The register file is the **5th clean live
 design class** and the first to exercise memory-array codegen end to end.
+
+### FIFO — combinational-output support; offline-proven, awaiting a confirming live run
+
+The 4-deep, 8-bit synchronous **FIFO** is the 6th design class and the first with a
+**combinational output**. A FIFO's `full`/`empty` flags must reflect *current* occupancy
+(a registered flag lags a cycle and admits over/under-flow), so they are continuous
+`assign`s, not registers. This motivated a new, reusable capability — **combinational-
+output support**: a `Transition` can be marked `combinational: true`, making its target
+signals born-concrete **wires** (never clocked, never reset), emitted as
+`CombinationalLogic`. It is symmetric to the memory `depth` carve-out (the bridge's `assign`
+path and Compiler 2's `output_wire` path already existed; only the engine carve-outs, the
+rule guards, and the marker were added). The FIFO reuses the register file's memory codegen
+and adds two pointers, an occupancy counter (a **flat ELSE-IF priority chain** — simultaneous
+read+write holds, write-only +1, read-only −1, else hold), a registered read `dout`, and the
+combinational `full`/`empty`. Reset clears the pointers/counter/`dout`, not the memory or the
+flags. Refinement uses only the existing Tier-1 rules (Init + Iteration on the three register
+transitions; the flag transition is born combinational).
+
+It is **offline-proven**: suite 316→331, lint-clean under `iverilog -Wall`, and **passes the
+real cocotb runner** (fill→full, write-blocked-when-full, registered-read drain, **simultaneous
+read+write** with count held, empty back-pressure, blocked read, write-after-drain).
+
+A 5-lens adversarial review returned **go-with-fixes**; the verified fixes are landed (suite
+→331): the **Agent 3 prompt** gained a combinational-output / FIFO-recipe section (the
+load-bearing `combinational: true` was previously invisible to the model, and an omitted flag
+silently produces a *registered* flag that builds, lints, and passes every gate, then fails
+only at cocotb), with a rule against mid-expression `IF` (the compiler only translates a
+leading/ELSE `IF`); the **Agent 1 prompt** gained a FIFO flow-control clause (back-pressure,
+post-edge flags, simultaneous r+w, registered-read latency); and `Alternation.apply` /
+`SequentialComposition.apply` now no-op on a combinational action (symmetric to the
+Iteration/Initialization guards — a stray live pick could otherwise corrupt a flag into a
+self-referential `assign` that iverilog accepts). **Not yet run live** — the count-chain
+priority ordering and the registered-read latency vs. live Agent-1 vectors remain unproven on
+a real model; `main.py` is metered.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 

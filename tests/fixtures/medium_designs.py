@@ -1,4 +1,4 @@
-"""
+r"""
 Hand-built MEDIUM-complexity design fixtures for the deterministic test suite.
 
 WHY THIS FILE EXISTS (G02)
@@ -685,6 +685,184 @@ def register_file_cocotb_trace() -> list[tuple[tuple[int, int, int, int], dict]]
 
 
 # ===========================================================================
+# Fixture 5 — 4-deep synchronous FIFO (memory + pointers + combinational flags)
+# ===========================================================================
+#
+# A synchronous FIFO / circular buffer: an 8-bit-wide, 4-deep memory with a
+# we-gated write port, a registered read port, and COMBINATIONAL full/empty
+# flags. This is the first design with a combinational OUTPUT — the flags must
+# reflect the CURRENT occupancy (a registered flag would lag and allow over/under-
+# flow), so `full`/`empty` are continuous `assign`s, not registers. It reuses the
+# register file's memory codegen (mem[4][8], indexed write/read) and adds two
+# pointers, an occupancy counter, and the flag logic.
+#
+#   Write port:  if wr_en and not full, mem[wptr] <= din; wptr advances (mod 4).
+#   Read  port:  if rd_en and not empty, dout <= mem[rptr] (registered); rptr++.
+#   count:       occupancy; +1 on a write-only cycle, -1 on a read-only cycle,
+#                unchanged on simultaneous read+write (a flat ELSE-IF priority
+#                chain — nesting only in the ELSE, never the THEN).
+#   full/empty:  COMBINATIONAL — assign full = count == 4; assign empty = count == 0.
+#   Reset:       clears wptr/rptr/count/dout to 0 (NOT mem, NOT the flags).
+#
+# wptr/rptr/count are emitted as observability output ports (state vars, not
+# r_-prefixed); the summary below lists only the eight real ports, so the cocotb
+# bench drives/checks exactly the FIFO interface and ignores the extra outputs.
+
+_FIFO_DEPTH = 4
+_FIFO_AW = 2        # 2-bit pointers
+_FIFO_DW = 8        # 8-bit data
+_FIFO_CW = 3        # count is 0..4 -> 3 bits
+
+# count next-state: a flat ELSE-IF priority chain (simultaneous r+w first ->
+# unchanged; then write-only -> +1; then read-only -> -1; else hold).
+_FIFO_COUNT_NEXT = (
+    "IF wr_en = 1 AND full = 0 AND rd_en = 1 AND empty = 0 THEN count "
+    "ELSE IF wr_en = 1 AND full = 0 THEN count + 1 "
+    "ELSE IF rd_en = 1 AND empty = 0 THEN count - 1 "
+    "ELSE count"
+)
+
+
+def fifo_formal_spec() -> FormalSpec:
+    """FormalSpec for the 4-deep FIFO (the LLM-facing form).
+
+    `mem` is a memory (depth 4); `full`/`empty` are COMBINATIONAL (the Flags
+    transition carries combinational=True). Refinement clocks the three register
+    transitions (Write, Read, UpdateCount) and resets wptr/rptr/count/dout; the
+    Flags transition is born combinational and is never iterated or reset.
+    """
+    return FormalSpec(
+        module_name="fifo",
+        description=(
+            "4-deep, 8-bit synchronous FIFO. A we-gated write port writes din into "
+            "mem[wptr] and advances wptr; a registered read port presents mem[rptr] "
+            "on dout and advances rptr; an occupancy counter drives COMBINATIONAL "
+            "full (count==4) and empty (count==0) flags. Synchronous reset clears "
+            "the pointers, counter, and dout; the memory and flags are not reset."
+        ),
+        variables={
+            "mem":   {"type": "Nat", "width": _FIFO_DW, "depth": _FIFO_DEPTH},
+            "wptr":  {"type": "Nat", "width": _FIFO_AW},
+            "rptr":  {"type": "Nat", "width": _FIFO_AW},
+            "count": {"type": "Nat", "width": _FIFO_CW},
+            "dout":  {"type": "Nat", "width": _FIFO_DW},
+            "full":  {"type": "Bit", "width": 1},
+            "empty": {"type": "Bit", "width": 1},
+        },
+        initial={"wptr": "0", "rptr": "0", "count": "0", "dout": "0"},
+        transitions=[
+            {"label": "Write", "condition": "wr_en = 1 AND full = 0",
+             "updates": {"mem[wptr]": "din", "wptr": "(wptr + 1) % 4"}},
+            {"label": "Read", "condition": "rd_en = 1 AND empty = 0",
+             "updates": {"dout": "mem[rptr]", "rptr": "(rptr + 1) % 4"}},
+            {"label": "UpdateCount", "condition": "TRUE",
+             "updates": {"count": _FIFO_COUNT_NEXT}},
+            {"label": "Flags", "condition": "TRUE", "combinational": True,
+             "updates": {"full": "count = 4", "empty": "count = 0"}},
+        ],
+        invariants=["count \\in 0..4"],
+    )
+
+
+def fifo_summary() -> SpecSummary:
+    """SpecSummary (Stage-1 form) for the FIFO — the eight real interface ports.
+
+    The internal pointers/counter are not listed (they emit as extra observability
+    outputs the bench ignores). The test vectors drive wr_en/rd_en/din and assert
+    dout/full/empty, from the reference model below.
+    """
+    return SpecSummary(
+        module_name="fifo",
+        description="4-deep 8-bit synchronous FIFO with combinational full/empty.",
+        ports=[
+            {"name": "clk", "direction": "input", "width": 1},
+            {"name": "reset", "direction": "input", "width": 1},
+            {"name": "wr_en", "direction": "input", "width": 1},
+            {"name": "rd_en", "direction": "input", "width": 1},
+            {"name": "din", "direction": "input", "width": _FIFO_DW},
+            {"name": "dout", "direction": "output", "width": _FIFO_DW},
+            {"name": "full", "direction": "output", "width": 1},
+            {"name": "empty", "direction": "output", "width": 1},
+        ],
+        test_vectors=[
+            {"inputs": {"wr_en": we, "rd_en": re, "din": din}, "expected": exp}
+            for (we, re, din), exp in fifo_cocotb_trace()
+        ],
+        reset_port="reset",
+        reset_active_low=False,
+    )
+
+
+def fifo_picker_sequence() -> list[tuple[str, dict]]:
+    """Init (reset the registers only) then Iteration on EACH clocked register
+    transition (Write, Read, UpdateCount). The Flags transition is combinational,
+    so it is never iterated — only the existing Tier-1 rules are used."""
+    return [
+        ("Initialization", {
+            "reset_values": {"wptr": "0", "rptr": "0", "count": "0", "dout": "0"},
+            "reset_action_name": "Reset"}),
+        ("Iteration", {"action_name": "Write"}),
+        ("Iteration", {"action_name": "Read"}),
+        ("Iteration", {"action_name": "UpdateCount"}),
+    ]
+
+
+# Stimulus (wr_en, rd_en, din): fill to full, blocked write, drain, simultaneous
+# read+write, empty, blocked read, write after drain.
+_FIFO_STIMULUS: list[tuple[int, int, int]] = [
+    (1, 0, 10), (1, 0, 20), (1, 0, 30), (1, 0, 40),  # fill -> full after the 4th
+    (1, 0, 50),                                       # write blocked (full)
+    (0, 1, 0), (0, 1, 0),                             # read 10, 20 (registered dout)
+    (1, 1, 60),                                       # simultaneous r+w (count holds)
+    (0, 1, 0), (0, 1, 0),                             # drain to empty
+    (0, 1, 0),                                        # read blocked (empty)
+    (1, 0, 70),                                       # write after drain
+]
+
+
+def _fifo_model(stim: list[tuple[int, int, int]]) -> list[tuple[tuple[int, int, int], dict]]:
+    """Reference model matching the generated RTL exactly.
+
+    Combinational full/empty are sampled from the PRE-edge count (so the write/read
+    gates use current occupancy); dout is a REGISTERED read (takes mem[rptr] sampled
+    before this edge's write); the asserted full/empty reflect the POST-edge count
+    (they are combinational off the just-updated counter). The generator clocks one
+    reset-deassert edge before vector 0 with all inputs 0 (a no-op), so the model
+    starts from the reset state. dout is always defined (reset 0, then read values),
+    so every vector asserts it.
+    """
+    mem = [None] * _FIFO_DEPTH
+    wptr = rptr = count = 0
+    dout = 0
+    out: list[tuple[tuple[int, int, int], dict]] = []
+    for (we, re, din) in stim:
+        full = 1 if count == _FIFO_DEPTH else 0
+        empty = 1 if count == 0 else 0
+        do_w = 1 if (we == 1 and full == 0) else 0
+        do_r = 1 if (re == 1 and empty == 0) else 0
+        new_dout = mem[rptr] if do_r else dout   # read-before-write
+        if do_w:
+            mem[wptr] = din
+            wptr = (wptr + 1) % _FIFO_DEPTH
+        if do_r:
+            rptr = (rptr + 1) % _FIFO_DEPTH
+        count = count + do_w - do_r
+        dout = new_dout
+        out.append((
+            (we, re, din),
+            {"dout": dout,
+             "full": 1 if count == _FIFO_DEPTH else 0,
+             "empty": 1 if count == 0 else 0},
+        ))
+    return out
+
+
+def fifo_cocotb_trace() -> list[tuple[tuple[int, int, int], dict]]:
+    """[((wr_en,rd_en,din), {dout,full,empty}), ...] for each cocotb vector."""
+    return _fifo_model(_FIFO_STIMULUS)
+
+
+# ===========================================================================
 # Registry — convenient iteration for parametrized tests
 # ===========================================================================
 
@@ -715,6 +893,13 @@ MEDIUM_DESIGNS: dict[str, dict] = {
         "summary": register_file_summary,
         "picker_sequence": register_file_picker_sequence,
         "cocotb_trace": register_file_cocotb_trace,
+        "has_free_inputs": True,
+    },
+    "fifo": {
+        "formal_spec": fifo_formal_spec,
+        "summary": fifo_summary,
+        "picker_sequence": fifo_picker_sequence,
+        "cocotb_trace": fifo_cocotb_trace,
         "has_free_inputs": True,
     },
 }

@@ -556,3 +556,83 @@ def test_end_to_end_offline_register_file_cocotb(tmp_path, monkeypatch):
         f"phase={result.get('phase')} error={result.get('error')}\n"
         f"{result.get('raw', '')[-2000:]}"
     )
+
+
+# ===========================================================================
+# Fifth medium design — 4-deep synchronous FIFO (memory + combinational flags)
+# ===========================================================================
+#
+# The FIFO is the first design with a COMBINATIONAL output: the full/empty flags
+# must reflect current occupancy, so they are continuous `assign`s, not registers.
+# It reuses the register file's memory codegen and adds pointers, an occupancy
+# counter, and the flag logic. A green cocotb run proves the combinational-output
+# support, the we-gated write, the registered read, simultaneous read+write, and
+# the full/empty back-pressure are all functionally correct.
+
+_FIFO_PROMPT = (
+    "Design a 4-deep, 8-bit synchronous FIFO with a write-enable, a read-enable, "
+    "and combinational full and empty flags."
+)
+
+
+def test_end_to_end_offline_fifo_chain_completes(tmp_path, monkeypatch):
+    """Full graph on the FIFO: chain completes through Stage 3 with a memory array,
+    registered read, and COMBINATIONAL full/empty flags."""
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "fifo", _FIFO_PROMPT)
+
+    assert _status(artifact_dir, "01_summary.json") == "success"
+    assert _status(artifact_dir, "02_testbench_meta.json") == "success"
+    assert _status(artifact_dir, "02_formal_spec.json") == "success"
+    assert _status(artifact_dir, "03_rtl_output.json") == "success", (
+        "Stage 3 did not produce success RTL; "
+        f"03_rtl_output.json = {(artifact_dir / '03_rtl_output.json').read_text()[:500]}"
+    )
+
+    verilog = (artifact_dir / "output.v").read_text()
+    assert "reg  [7:0] mem [0:3];" in verilog            # memory array
+    assert "assign full = count == 4;" in verilog         # combinational flag
+    assert "assign empty = count == 0;" in verilog
+    assert "mem[wptr] <=" in verilog                       # indexed write
+    assert "dout <= " in verilog                            # registered read
+    assert "always @(posedge clk)" in verilog
+    # full/empty are output WIRES (combinational), not registers.
+    assert "output full" in verilog and "output reg full" not in verilog
+    assert "output empty" in verilog and "output reg empty" not in verilog
+    try:
+        verify_banlist(verilog)
+    except BanlistViolation as exc:  # pragma: no cover - failure path
+        pytest.fail(f"Generated FIFO RTL violates the banlist: {exc}")
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG, reason="iverilog not installed")
+def test_end_to_end_offline_fifo_lints_clean(tmp_path, monkeypatch):
+    """The graph-generated FIFO Verilog lints clean under iverilog."""
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "fifo", _FIFO_PROMPT)
+    import subprocess
+    result = subprocess.run(
+        ["iverilog", "-Wall", "-t", "null", str(artifact_dir / "output.v")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated FIFO RTL failed iverilog lint:\n"
+        f"{result.stdout}\n{result.stderr}\n\n{(artifact_dir / 'output.v').read_text()}"
+    )
+
+
+@pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
+def test_end_to_end_offline_fifo_cocotb(tmp_path, monkeypatch):
+    """Functional verification: the graph's FIFO RTL PASSes cocotb.
+
+    The headline proof for this design class. The vectors exercise fill-to-full,
+    write-blocked-when-full, registered-read drain, simultaneous read+write (count
+    held), empty back-pressure, read-blocked-when-empty, and write-after-drain.
+    A PASS proves the combinational flag logic, the memory write/read, and the
+    occupancy counter are all functionally correct.
+    """
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "fifo", _FIFO_PROMPT)
+    result = _run_real_cocotb(artifact_dir, "fifo", inject_timescale=True)
+    assert result.get("status") == "pass", (
+        "FIFO RTL failed cocotb (memory + combinational flags):\n"
+        f"phase={result.get('phase')} error={result.get('error')}\n"
+        f"{result.get('raw', '')[-2000:]}"
+    )
