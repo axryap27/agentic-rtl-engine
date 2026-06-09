@@ -4,7 +4,7 @@ A snapshot of what works today and what's open. For the full history of resolved
 and the test-comprehensiveness audit, see the git log — this file tracks the *current*
 state, not the archive.
 
-_Last updated: 2026-06-08._
+_Last updated: 2026-06-09._
 
 ---
 
@@ -17,20 +17,23 @@ _Last updated: 2026-06-08._
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
 | Stage 4 — cocotb simulation (deterministic) | built |
 | Diagnoser — failure classification + routing | built |
-| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU; robust to a throwing/cycling live picker |
+| Refinement engine + six Tier-1 rules | built; converges on counter, flip-flop, FSM, ALU, accumulator; robust to a throwing/cycling live picker |
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **265 passed, 0 xfailed** |
+| Deterministic test suite | **289 passed, 0 xfailed** |
 
 The deterministic spine is verified end to end. The full LangGraph now runs **NL → RTL →
-cocotb PASS offline** on two medium designs — a traffic-light FSM and a multi-op ALU —
-with every LLM boundary mocked, exercising the real engine, both compilers, and the
-cocotb runner.
+cocotb PASS offline** on three medium designs — a traffic-light FSM, a multi-op ALU, and
+an 8-bit accumulator — with every LLM boundary mocked, exercising the real engine, both
+compilers, and the cocotb runner.
 
-The full pipeline is now **live-confirmed on TWO design classes**: the 2-bit counter
-(`885b9fc0a06b`) and the traffic-light FSM (`15d3dd354b17`, 2026-06-08). See
-"FSM breadth — live-confirmed green" below.
+Live-confirmed design classes: the 2-bit counter (`885b9fc0a06b`), the traffic-light FSM
+(`15d3dd354b17`), and the multi-op ALU. The 8-bit accumulator (`223427-d7a921`,
+2026-06-09) reached cocotb PASS live too, but it was a **false green** that exposed two
+real bugs — both now fixed and regression-tested (see "Accumulator — false green" below).
+That run also **confirmed RC1's active-low reset path live** (`if (!rst_n)`), closing the
+gap the FSM run left open.
 
 ---
 
@@ -137,17 +140,43 @@ The re-run refined in **4 clean, replayable steps** (`Initialization` + `Iterati
 contiguous hashes, zero junk `IntroduceVariable`s) — the bounded-action-space thesis holds
 on a third NL prompt.
 
-Remaining live scope: the **multi-op ALU** is proven offline but not yet run live, and
-**RC1's active-low path** awaits a live active-low design to confirm.
+Remaining live scope: all four proven classes have now run live — counter, FSM, ALU, and
+accumulator. RC1's active-low path is **confirmed live** (the accumulator's `rst_n`).
 
-### Deferred — refinement-chain replay on the cocotb-revise path
+### Accumulator — live run exposed a false green (now fixed) (run `223427-d7a921`, 2026-06-09)
 
-When `run_stage3_revise_cocotb` re-enters Stage 3 with the same `run_id`, the engine
-appends a fresh chain onto the stale prefix instead of truncating (as the backtrack path
-correctly does), yielding a non-replayable `refinement_chain.json` (observed in the failed
-`9a77ce279bfb`). Deferred: the fix touches the engine/revise replay contract and risks
-destabilising backtrack's golden replay; it does not fire on the happy path (a first-run
-pass never invokes revise).
+The 8-bit accumulator (active-low `rst_n`, enable-gated `acc <= acc + din`) was the 4th
+live design. It reached cocotb PASS — but as a **false green**: Agent 3 modelled the data
+input `din` and the enable `en` as STATE VARIABLES, so the reverse bridge emitted them as
+`output reg`. The design could never receive `din`, yet cocotb — which force-drives the
+mis-declared output nets — passed anyway. Agent 1's port directions were correct; the
+fault was Agent 3's spec authoring. Three fixes, all offline-proven, verified by an
+adversarial multi-agent review (parser-robustness + replay-contract lenses) plus 8
+regression tests in `tests/test_input_modeling_regression.py`:
+
+- **RC4 — deterministic port-direction gate.** After Compiler 2, the emitted module's port
+  directions are checked against the SpecSummary; a summary `input` emitted as `output`
+  downgrades the RTL artifact to `partial` (→ halt) with `port_direction_errors`, instead
+  of shipping a structurally-wrong interface. Fails LOUD if it cannot parse the header
+  (never silently certifies). `pipeline/nodes/stage3.py`.
+- **RC5 — Agent 3 prompt (root cause).** Now forbids modelling data/control inputs as
+  `variables`, with the `x -> x`-in-every-action litmus the bug exhibited.
+  `pipeline/agents/agent3.py`. Live confirmation rides a future run; the RC4 gate is the
+  deterministic backstop until then.
+- **RC6 — revise-replay.** See "Resolved — refinement-chain replay" below; it fired on
+  this run.
+
+### Resolved — refinement-chain replay on the cocotb-revise path
+
+The cocotb-revise path used to append a fresh chain onto the stale prefix (instead of
+truncating like backtrack), yielding a non-replayable `refinement_chain.json`. This
+**fired live** on the accumulator run (`223427-d7a921`): a syntax-error revise re-entry
+left a hash discontinuity at the prefix→suffix seam. **Fixed** (2026-06-09): the revise
+path now clears `refinement_chain.json` (preserving it as
+`refinement_chain_pre_revise_<n>.json`, suffixed per attempt) before re-running, so the
+re-authored spec gets a self-contained, replayable chain. Backtrack's golden replay is
+untouched — it truncates a PARTIAL prefix on an UNCHANGED spec, whereas a revise discards
+the WHOLE prefix because the spec changed. Regression: `tests/test_input_modeling_regression.py`.
 
 ---
 
