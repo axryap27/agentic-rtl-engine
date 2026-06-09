@@ -15,6 +15,11 @@ from pydantic import BaseModel
 class Variable(BaseModel):
     type: str   # "Nat" or "Bit"
     width: int  # bit width; used by Compiler 1 to add range constraints e.g. a \in 0..255
+    depth: Optional[int] = None  # if set, this variable is a MEMORY ARRAY of `depth`
+    #                              words each `width` bits (a register file / RAM).
+    #                              A memory is emitted as `reg [width-1:0] name [0:depth-1]`,
+    #                              is never a port, and is not reset (synthesis-canonical:
+    #                              memories carry no reset). Scalars leave this None.
 
 
 class Transition(BaseModel):

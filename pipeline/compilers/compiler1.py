@@ -114,6 +114,25 @@ _EXPR_SUBS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# An update KEY may name a single memory-array element, e.g. ``mem[waddr]``
+# (a register-file write). The base name is a declared array variable; the
+# bracketed text is the index expression. A plain scalar key has no brackets.
+_INDEXED_KEY_RE = re.compile(r"^([A-Za-z_]\w*)\s*\[\s*(.+?)\s*\]$")
+
+
+def _split_indexed_key(key: str) -> tuple[str, Optional[str]]:
+    """Split an update key into (base_variable, index_expr_or_None).
+
+    ``"mem[waddr]"`` -> ``("mem", "waddr")``; ``"rdata"`` -> ``("rdata", None)``.
+    Pure. Used so a memory-element write is validated against / emitted from its
+    base array variable rather than treated as an unknown scalar.
+    """
+    m = _INDEXED_KEY_RE.match(key.strip())
+    if m:
+        return m.group(1), m.group(2)
+    return key.strip(), None
+
+
 def translate_expr(expr: str) -> str:
     """
     Translate a plain-English boolean expression to TLA+ surface syntax.
@@ -147,6 +166,12 @@ def _range_constraint(varname: str, var: "Variable") -> Optional[str]:
       Bit  width=1  ->  varname \\in {0, 1}
       Nat  width=8  ->  varname \\in 0..255
     """
+    # A memory array (depth set) is a TLA+ function, not a scalar in 0..hi — a
+    # `mem \in 0..255` constraint would be wrong (mem is [0..depth-1 -> 0..hi]).
+    # Skip the range constraint for memories; their elements' widths are enforced
+    # in the generated RTL, not via this (best-effort, TLC-only) invariant.
+    if getattr(var, "depth", None):
+        return None
     if var.type == "Bit":
         return f"{varname} \\in {{0, 1}}"
     if var.type == "Nat" and var.width > 0:
@@ -240,21 +265,34 @@ def _emit_tla(spec: "FormalSpec") -> str:
         # Guard (enabling condition)
         guard = translate_expr(t.condition) if t.condition.strip() else "TRUE"
 
-        # Build UNCHANGED list for variables not mentioned in updates
-        updated = set(t.updates.keys())
+        # Build UNCHANGED list for variables not mentioned in updates. An update
+        # key may be a memory-element write (``mem[waddr]``); it touches its BASE
+        # array variable, so use base names here or the array would wrongly land
+        # in UNCHANGED alongside its own EXCEPT update (a TLA+ contradiction).
+        updated = {_split_indexed_key(k)[0] for k in t.updates.keys()}
         unchanged = [vn for vn in var_names if vn not in updated]
 
         lines.append(f"{label} ==")
         lines.append(f"    /\\ {guard}")
 
         # Primed update conjuncts
-        for vn, expr in t.updates.items():
-            if vn not in spec.variables:
+        for key, expr in t.updates.items():
+            base, index = _split_indexed_key(key)
+            if base not in spec.variables:
                 raise CompilerError(
-                    f"Transition {label!r} updates unknown variable {vn!r} "
+                    f"Transition {label!r} updates unknown variable {base!r} "
                     f"(not declared in FormalSpec.variables)"
                 )
-            lines.append(f"    /\\ {vn}' = {translate_expr(expr)}")
+            if index is not None:
+                # Memory-element write: emit the TLA+ function-update form so the
+                # spec stays valid for TLC (mem[i]' = e is not legal; the EXCEPT
+                # form is). The RTL path renders the same write as mem[i] <= e.
+                lines.append(
+                    f"    /\\ {base}' = [{base} EXCEPT "
+                    f"![{translate_expr(index)}] = {translate_expr(expr)}]"
+                )
+            else:
+                lines.append(f"    /\\ {base}' = {translate_expr(expr)}")
 
         # UNCHANGED for variables not touched by this action
         if unchanged:
