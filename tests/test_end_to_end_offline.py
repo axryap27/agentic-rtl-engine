@@ -392,6 +392,15 @@ def test_end_to_end_offline_accumulator_chain_completes(tmp_path, monkeypatch):
     assert "!rst_n" in verilog, (
         "RC1 regression: active-low reset not emitted as `if (!rst_n)`:\n" + verilog
     )
+    # Coupling pin (verification finding): the port-direction gate's parser must
+    # read THIS fresh Compiler 2 output correctly — din/en as inputs (the correct
+    # interface) — so any future emitter change that breaks the parser fails here
+    # rather than silently disabling the gate.
+    from pipeline.nodes.stage3 import _parse_module_port_directions
+    assert _parse_module_port_directions(verilog) == {
+        "clk": "input", "rst_n": "input", "en": "input",
+        "din": "input", "acc": "output",
+    }
     try:
         verify_banlist(verilog)
     except BanlistViolation as exc:  # pragma: no cover - failure path

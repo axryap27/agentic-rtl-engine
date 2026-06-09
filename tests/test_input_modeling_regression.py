@@ -175,11 +175,16 @@ def test_gate_passes_correct_interface():
     assert _verify_port_directions(_CORRECT_VERILOG, _ACC_EXPECTED_DIRS) == []
 
 
-def test_gate_is_fail_soft():
-    # No expected directions (summary unreadable) → never blocks.
+def test_gate_failsoft_on_unknown_contract_but_loud_on_unparseable_output():
+    """Asymmetric by design (verification finding): an UNKNOWN contract (summary
+    unreadable → empty expected) is a genuine no-op, but a KNOWN contract whose
+    emitted header cannot be parsed must fail LOUD — 'unable to verify' must never
+    pass as 'verified clean'."""
+    # Unknown contract → no-op.
     assert _verify_port_directions(_LIVE_BUGGY_VERILOG, {}) == []
-    # Unparseable "verilog" (no module header) → never blocks.
-    assert _verify_port_directions("not verilog at all", _ACC_EXPECTED_DIRS) == []
+    # Known contract + unparseable output → loud (refuses to certify).
+    loud = _verify_port_directions("not verilog at all", _ACC_EXPECTED_DIRS)
+    assert loud and "could not parse" in loud[0]
 
 
 def test_summary_port_directions_reads_artifact(tmp_path):
@@ -314,8 +319,8 @@ def test_revise_clears_stale_chain_for_replayable_result(tmp_path, monkeypatch):
     state = {"run_id": run_id, "retry_counts": {}, "halt": False}
     run_stage3_revise_cocotb(state)
 
-    # The stale chain is preserved, not silently dropped.
-    preserved = json.loads((art / "refinement_chain_pre_revise.json").read_text())
+    # The stale chain is preserved (suffixed by attempt #1), not silently dropped.
+    preserved = json.loads((art / "refinement_chain_pre_revise_1.json").read_text())
     assert preserved == stale_chain
 
     # The new chain replays from the persisted (revised) spec: contiguous hashes,

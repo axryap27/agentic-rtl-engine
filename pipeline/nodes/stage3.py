@@ -470,10 +470,22 @@ def _verify_port_directions(verilog: str, expected: dict[str, str]) -> list[str]
     header yields no violations — the gate never blocks a run it cannot assess.
     """
     if not expected:
+        # Summary unreadable → the interface contract is unknown, so there is
+        # nothing to verify against. Genuine fail-soft (no-op).
         return []
     actual = _parse_module_port_directions(verilog)
     if not actual:
-        return []
+        # The contract IS known (expected non-empty) but the emitted header could
+        # not be parsed. "Unable to verify" must NOT masquerade as "verified
+        # clean" — that silent-pass path is exactly what this gate exists to
+        # remove. Compiler 2 emits ANSI headers the parser handles, so this is
+        # unreachable today; fail LOUD so a future emitter shape the parser cannot
+        # read surfaces here instead of silently disabling the gate.
+        return [
+            "could not parse the generated module's port directions from its "
+            "header (an unsupported emit shape?); refusing to certify the "
+            "interface rather than pass it unverified"
+        ]
     violations: list[str] = []
     for name, want in sorted(expected.items()):
         got = actual.get(name)
@@ -855,7 +867,12 @@ def run_stage3_revise_cocotb(state: PipelineState) -> PipelineState:
     # spec changed.)
     chain_path = artifact_dir / "refinement_chain.json"
     if chain_path.exists():
-        (artifact_dir / "refinement_chain_pre_revise.json").write_text(
+        # Suffix the preserved copy with the revise-attempt number (the
+        # stage4_cocotb counter was incremented above) so a SECOND sequential
+        # revise does not clobber the first one's history — the ORIGINAL failing
+        # run's chain must survive for offline debugging.
+        attempt = state["retry_counts"].get("stage4_cocotb", 1)
+        (artifact_dir / f"refinement_chain_pre_revise_{attempt}.json").write_text(
             chain_path.read_text()
         )
         chain_path.write_text("[]")
