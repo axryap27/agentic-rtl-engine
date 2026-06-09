@@ -284,9 +284,25 @@ leading/ELSE `IF`); the **Agent 1 prompt** gained a FIFO flow-control clause (ba
 post-edge flags, simultaneous r+w, registered-read latency); and `Alternation.apply` /
 `SequentialComposition.apply` now no-op on a combinational action (symmetric to the
 Iteration/Initialization guards — a stray live pick could otherwise corrupt a flag into a
-self-referential `assign` that iverilog accepts). **Not yet run live** — the count-chain
-priority ordering and the registered-read latency vs. live Agent-1 vectors remain unproven on
-a real model; `main.py` is metered.
+self-referential `assign` that iverilog accepts).
+
+**Live run (`181016-ff15af`, 2026-06-09) — CODEGEN VALIDATED, but a FALSE RED at cocotb.**
+The Agent-3 prompt fixes worked: live Agent 3 authored the exact intended FormalSpec
+(`combinational: true` flags, the flat ELSE-IF count chain, the we-gated indexed write, the
+registered read, reset clearing only the pointers/counter/`dout`), refinement converged, and
+Compiler 2 emitted **correct RTL — proven by running the live `output.v` against the verified
+fixture vectors (cocotb PASS)**. The live cocotb run nonetheless failed, because **one of
+Agent 1's 19 auto-generated golden vectors was arithmetically wrong**: at vector 10 the FIFO
+drains to `count == 0`, so the combinational `empty` is correctly `1`, but Agent 1 expected
+`0` (it was right on the other 18, including registered-read latency, blocked write/read
+back-pressure, simultaneous read+write count-hold, post-edge flags, and a mid-stream reset).
+This is a **false red** — correct RTL failed by an incorrect test — the inverse of the
+accumulator false-green, and the diagnoser cannot repair it (it revises an already-correct
+spec). **Architectural finding:** Agent-1 hand-computed golden vectors are a fragility that
+grows with sequential-design complexity; the robust fix is to derive golden vectors
+deterministically from the `FormalSpec` (itself an executable model) rather than from a
+one-shot LLM. The FIFO **codegen + combinational-output support are validated**; live
+*verification* of deep sequential designs is the open item.
 
 ### Resolved — refinement-chain replay on the cocotb-revise path
 
