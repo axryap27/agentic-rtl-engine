@@ -26,6 +26,11 @@ class Transition(BaseModel):
     label: str                  # action name; matches TLA+ action label for TLC error tracing
     condition: str              # enabling condition using plain English operators (AND, OR, NOT)
     updates: dict[str, str]     # maps variable name to next-value expression; all variables must be listed
+    combinational: bool = False # if True, this transition is CONTINUOUS (combinational) logic, not a
+    #                             clocked register update: its target signals are wires driven by an
+    #                             `assign` (e.g. a FIFO `full = count == DEPTH` flag), born concrete,
+    #                             never clocked (Iteration), and never reset. Clocked transitions (the
+    #                             default) become `always @(posedge clk)` register updates.
 
 
 # Produced by Agent 3 from JSON(S).
