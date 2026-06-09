@@ -383,6 +383,143 @@ def alu_cocotb_trace() -> list[tuple[tuple[int, int, int], tuple[int, int]]]:
 
 
 # ===========================================================================
+# Fixture 3 — 8-bit enable-gated accumulator (active-low reset)
+# ===========================================================================
+#
+# A single 8-bit register `acc` whose next value is its OWN current value plus a
+# free 8-bit data input `din`, gated by a 1-bit enable `en`, with mod-256
+# wraparound. This is the first fixture whose next-state references BOTH its own
+# register AND a free data input (the counter references only itself; the ALU
+# references only inputs) — the union a real datapath register needs.
+#
+# It is also the first fixture with an ACTIVE-LOW reset (`rst_n`), so it
+# exercises the RC1 polarity path end to end: the reverse bridge and Compiler 2
+# must emit `if (!rst_n)`. (The live FSM run happened to pick active-high `rst`,
+# so this is the offline proof of RC1's active-low branch.)
+#
+# Enable-gated next-state as a flat ELSE-IF chain (TLA+ operators; the THEN
+# branch is a flat expression, never a nested conditional). After Initialization
+# wraps it in the reset guard the full next-state is
+#   IF rst_n = 0 THEN 0 ELSE IF en = 1 THEN acc + din ELSE acc
+# — a flat ELSE-IF chain (nesting only in the ELSE branch), so it stays clear of
+# the THEN-nesting splitter limitation documented above.
+_ACC_NEXT = r"IF en = 1 THEN acc + din ELSE acc"
+
+
+def accumulator_formal_spec() -> FormalSpec:
+    """FormalSpec for the 8-bit enable-gated accumulator (the LLM-facing form).
+
+    The transition's `updates` already carry the concrete enable-gated add, as a
+    realistic Agent-3 output would; refinement only adds reset (Initialization,
+    active-low) and clocking (Iteration).
+    """
+    return FormalSpec(
+        module_name="accumulator",
+        description=(
+            "8-bit accumulator. A 1-bit enable `en` gates adding an 8-bit data "
+            "input `din` into an 8-bit `acc` register (mod-256 wraparound); when "
+            "`en` is low `acc` holds. Synchronous active-low reset clears acc to 0."
+        ),
+        variables={
+            "acc": {"type": "Nat", "width": 8},
+        },
+        initial={"acc": "0"},
+        transitions=[
+            {
+                "label": "Accumulate",
+                "condition": "TRUE",
+                "updates": {"acc": _ACC_NEXT},
+            },
+        ],
+        invariants=["acc \\in 0..255"],
+    )
+
+
+def accumulator_summary() -> SpecSummary:
+    """SpecSummary (Stage-1 form) for the accumulator, with active-low reset.
+
+    `din` is declared 8-bit and `en` 1-bit (the design's truth); the bridge sizes
+    these free inputs from these port widths (the D2 fix), so the generated
+    `acc + din` is a full 8-bit add rather than a truncated one. `reset_active_low`
+    drives the RC1 codegen path so the bridge + Compiler 2 emit `if (!rst_n)`.
+    """
+    return SpecSummary(
+        module_name="accumulator",
+        description="8-bit enable-gated accumulator; sync active-low reset.",
+        ports=[
+            {"name": "clk", "direction": "input", "width": 1},
+            {"name": "rst_n", "direction": "input", "width": 1},
+            {"name": "en", "direction": "input", "width": 1},
+            {"name": "din", "direction": "input", "width": 8},
+            {"name": "acc", "direction": "output", "width": 8},
+        ],
+        test_vectors=[
+            {
+                "inputs": {"en": en, "din": din},
+                "expected": {"acc": acc},
+            }
+            for (en, din), acc in accumulator_cocotb_trace()
+        ],
+        reset_port="rst_n",
+        reset_active_low=True,
+    )
+
+
+def accumulator_picker_sequence() -> list[tuple[str, dict]]:
+    """Applicability-driven rule sequence that drives the accumulator to RTL-style.
+
+    Initialization (active-low reset clearing acc to 0) then Iteration (clock the
+    enable-gated Accumulate action). The concrete enable-gated `updates` already
+    exist on the transition, so no Alternation is needed — the `en` guard rides
+    inside the update expression, exactly as the ALU's op-mux does.
+    """
+    return [
+        (
+            "Initialization",
+            {
+                "reset_values": {"acc": "0"},
+                "reset_action_name": "Reset",
+            },
+        ),
+        ("Iteration", {"action_name": "Accumulate"}),
+    ]
+
+
+def _accumulator_model(stimulus: list[tuple[int, int]]) -> list[tuple[tuple[int, int], int]]:
+    """Reference model of the registered, self-referential, mod-256 accumulate.
+
+    Unlike the memoryless ALU, each expected `acc` depends on the PREVIOUS one.
+    The starting state is 0: the cocotb reset clears acc, and `en` is pre-driven
+    to 0 by the generator's input-init block, so the reset-deassert edge HOLDS acc
+    at 0 (no accumulation) — hence there is NO one-cycle offset here (contrast
+    traffic_light, whose self-driven next-state DOES step on the deassert edge).
+    Vector i drives (en_i, din_i) and the post-edge acc is f(acc_{i-1}, en_i, din_i).
+    """
+    acc = 0
+    out = []
+    for en, din in stimulus:
+        if en:
+            acc = (acc + din) & 0xFF
+        out.append(((en, din), acc))
+    return out
+
+
+# Stimulus: accumulate, accumulate, hold (en=0), accumulate, wrap past 255.
+_ACC_STIMULUS: list[tuple[int, int]] = [
+    (1, 5),    # +5   -> 5
+    (1, 10),   # +10  -> 15
+    (0, 99),   # hold -> 15   (en=0; din ignored)
+    (1, 1),    # +1   -> 16
+    (1, 250),  # +250 -> 10   (266 mod 256 — exercises 8-bit wraparound)
+]
+
+
+def accumulator_cocotb_trace() -> list[tuple[tuple[int, int], int]]:
+    """[((en,din), acc), ...] for each cocotb vector (see _accumulator_model)."""
+    return _accumulator_model(_ACC_STIMULUS)
+
+
+# ===========================================================================
 # Registry — convenient iteration for parametrized tests
 # ===========================================================================
 
@@ -399,6 +536,13 @@ MEDIUM_DESIGNS: dict[str, dict] = {
         "summary": alu_summary,
         "picker_sequence": alu_picker_sequence,
         "cocotb_trace": alu_cocotb_trace,
+        "has_free_inputs": True,
+    },
+    "accumulator": {
+        "formal_spec": accumulator_formal_spec,
+        "summary": accumulator_summary,
+        "picker_sequence": accumulator_picker_sequence,
+        "cocotb_trace": accumulator_cocotb_trace,
         "has_free_inputs": True,
     },
 }

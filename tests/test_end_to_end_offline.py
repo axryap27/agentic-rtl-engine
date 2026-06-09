@@ -348,3 +348,89 @@ def test_alu_freeinput_width_correct(tmp_path, monkeypatch):
         f"phase={result.get('phase')} error={result.get('error')}\n"
         f"{result.get('raw', '')[-1500:]}"
     )
+
+
+# ===========================================================================
+# Third medium design — 8-bit accumulator (self-referential datapath + RC1)
+# ===========================================================================
+#
+# The accumulator is the first fixture whose next-state references BOTH its own
+# register and a free data input (`acc <= acc + din`, gated by `en`), and the
+# first to use an ACTIVE-LOW reset (`rst_n`). A green cocotb run here proves two
+# things end to end through the REAL engine + Compiler 2: (1) a self-referential,
+# enable-gated, wrapping datapath register is functionally correct, and (2) RC1's
+# active-low reset polarity (`if (!rst_n)`) is honoured in generated RTL — the
+# branch the live FSM run never exercised.
+
+_ACC_PROMPT = "Design an 8-bit accumulator with an enable and a synchronous active-low reset."
+
+
+def test_end_to_end_offline_accumulator_chain_completes(tmp_path, monkeypatch):
+    """Full graph on the accumulator: chain completes through Stage 3, active-low.
+
+    Asserts the 01/02/03 chain is all 'success', the RTL is a clocked 8-bit
+    register block, and — the RC1 signature — the reset is emitted active-low
+    (`if (!rst_n)`), not the hardcoded active-high form the bridge/Compiler 2
+    used before RC1.
+    """
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "accumulator", _ACC_PROMPT,
+    )
+
+    assert _status(artifact_dir, "01_summary.json") == "success"
+    assert _status(artifact_dir, "02_testbench_meta.json") == "success"
+    assert _status(artifact_dir, "02_formal_spec.json") == "success"
+    assert _status(artifact_dir, "03_rtl_output.json") == "success", (
+        "Stage 3 did not produce success RTL; "
+        f"03_rtl_output.json = {(artifact_dir / '03_rtl_output.json').read_text()[:500]}"
+    )
+
+    verilog = (artifact_dir / "output.v").read_text()
+    assert "always @(posedge clk)" in verilog
+    assert "output reg [7:0] acc" in verilog
+    # RC1: active-low reset polarity must reach codegen.
+    assert "!rst_n" in verilog, (
+        "RC1 regression: active-low reset not emitted as `if (!rst_n)`:\n" + verilog
+    )
+    try:
+        verify_banlist(verilog)
+    except BanlistViolation as exc:  # pragma: no cover - failure path
+        pytest.fail(f"Generated accumulator RTL violates the banlist: {exc}")
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG, reason="iverilog not installed")
+def test_end_to_end_offline_accumulator_lints_clean(tmp_path, monkeypatch):
+    """The graph-generated accumulator Verilog lints clean under iverilog."""
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "accumulator", _ACC_PROMPT,
+    )
+    import subprocess
+    result = subprocess.run(
+        ["iverilog", "-Wall", "-t", "null", str(artifact_dir / "output.v")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated accumulator RTL failed iverilog lint:\n"
+        f"{result.stdout}\n{result.stderr}\n\n{(artifact_dir / 'output.v').read_text()}"
+    )
+
+
+@pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
+def test_end_to_end_offline_accumulator_cocotb(tmp_path, monkeypatch):
+    """Functional verification: the graph's accumulator RTL PASSes cocotb.
+
+    The headline proof for this design class. The fixture's vectors exercise
+    accumulate, hold (en=0), and 8-bit wraparound, each expected value depending
+    on the previous (self-referential state). A PASS proves the bridge sized the
+    8-bit `din` free input correctly (D2), the enable-gated self-update is right,
+    and the active-low reset (RC1) cleared acc to 0 before the first vector.
+    """
+    artifact_dir = _seed_and_invoke(
+        tmp_path, monkeypatch, "accumulator", _ACC_PROMPT,
+    )
+    result = _run_real_cocotb(artifact_dir, "accumulator", inject_timescale=True)
+    assert result.get("status") == "pass", (
+        "Accumulator RTL failed cocotb (self-referential accumulate / active-low reset):\n"
+        f"phase={result.get('phase')} error={result.get('error')}\n"
+        f"{result.get('raw', '')[-2000:]}"
+    )
