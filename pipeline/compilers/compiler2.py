@@ -427,6 +427,11 @@ class RTLTLACompiler:
         # Per-variable bit width, captured from the "\* width: N" comment the
         # bridge attaches to each VARIABLES entry (BUG-17). Defaults to 1.
         self.widths: dict[str, int] = {}
+        # Per-variable memory DEPTH, captured from a "\* width: N depth: K"
+        # comment. A variable with depth > 1 is a register file / RAM: emitted
+        # as `reg [N-1:0] name [0:K-1]`, classified as an internal register
+        # (never a port), and indexed (name[idx]) on both read and write.
+        self.depths: dict[str, int] = {}
         self.comb_vars: set[str] = set()   # driven by CombinationalLogic
         self.seq_vars: set[str] = set()    # driven by UpdatePipeline
 
@@ -440,6 +445,25 @@ class RTLTLACompiler:
     def _is_internal_reg(self, v: str) -> bool:
         """True for variables that are always internal (r_* naming convention)."""
         return any(v.startswith(p) for p in self._INTERNAL_PREFIXES)
+
+    def _is_memory(self, v: str) -> bool:
+        """True for a memory array (depth > 1) — a register file / RAM.
+
+        A memory is unpacked storage (`reg [w-1:0] v [0:K-1]`), which Verilog-2001
+        cannot expose as a module port, so it is ALWAYS an internal register
+        regardless of which block drives it. Accessed element-wise (v[idx]).
+        """
+        return self.depths.get(v, 0) > 1
+
+    @staticmethod
+    def _lhs_base(lhs: str) -> str:
+        """Base signal name of a (possibly indexed) assignment LHS.
+
+        ``"mem[waddr]"`` -> ``"mem"``; ``"rdata"`` -> ``"rdata"``. Used so a
+        memory-element write is CLASSIFIED and tracked under its base array name
+        while the full indexed LHS is preserved for emission (``mem[waddr] <= …``).
+        """
+        return lhs.split("[", 1)[0].strip()
 
     def _emit(self, v: str) -> bool:
         """True when this variable participates in any Verilog logic."""
@@ -459,6 +483,11 @@ class RTLTLACompiler:
             return "fixed_input"
         if self._is_verify(v):
             return "drop"
+        # A memory array can never be a Verilog-2001 port, so it is internal
+        # storage even though UpdatePipeline drives it (it is in seq_vars). This
+        # check MUST precede the seq_vars → output_reg branch below.
+        if self._is_memory(v):
+            return "internal_reg"
         if self._is_internal_reg(v):
             return "internal_reg"
         if v in self.seq_vars:
@@ -496,6 +525,10 @@ class RTLTLACompiler:
             nm = re.search(r"\b(\w+)\b", code_part)
             if nm:
                 self.widths[nm.group(1)] = int(wm.group(1))
+                # A memory array also carries "depth: K" in the same comment.
+                dm = re.search(r"\bdepth:\s*(\d+)", line)
+                if dm:
+                    self.depths[nm.group(1)] = int(dm.group(1))
         raw = re.sub(r"\\\*[^\n]*", "", raw)          # strip \* comments
         raw = re.sub(r"\(\*[\s\S]*?\*\)", "", raw)    # strip (* *) comments
         self.variables = [t for t in re.split(r"[\s,]+", raw) if re.match(r"^\w+$", t or "")]
@@ -688,13 +721,17 @@ class RTLTLACompiler:
 
         assigns: list[str] = []
         for conj in self._join_conjuncts(block):
-            m = re.match(r"/\\\s*(\w+)'\s*=\s*(.*)", conj)
+            # Allow an optional [index] before the prime, consistent with the
+            # sequential parser, so an indexed LHS is never silently truncated to
+            # its base name here (regex-divergence between the two parse paths).
+            m = re.match(r"/\\\s*(\w+(?:\[[^\]]*\])?)'\s*=\s*(.*)", conj)
             if not m:
                 continue
             var, expr = m.group(1), m.group(2).strip()
-            if not self._emit(var):
+            base = self._lhs_base(var)
+            if not self._emit(base):
                 continue
-            self.comb_vars.add(var)
+            self.comb_vars.add(base)
             assigns.append(f"    assign {var} = {self.translate_expr(expr)};")
         return assigns
 
@@ -747,11 +784,14 @@ class RTLTLACompiler:
         """Extract [(varname, tla_expr)] from a block of TLA+ conjuncts."""
         result: list[tuple[str, str]] = []
         for conj in self._join_conjuncts(text):
-            m = re.match(r"/\\\s*(\w+)'\s*=\s*(.*)", conj)
+            # The LHS may be a memory-element write `mem[waddr]'` (register file),
+            # so allow an optional [index] before the prime. The full indexed LHS
+            # is kept verbatim for emission; classification uses its base name.
+            m = re.match(r"/\\\s*(\w+(?:\[[^\]]*\])?)'\s*=\s*(.*)", conj)
             if not m:
                 continue
             var, expr = m.group(1), m.group(2).strip()
-            if self._emit(var) and var != "clk":
+            if self._emit(self._lhs_base(var)) and self._lhs_base(var) != "clk":
                 result.append((var, expr))
         return result
 
@@ -768,8 +808,10 @@ class RTLTLACompiler:
         reset_assigns = self._parse_assignments(reset_text)
         normal_assigns = self._parse_assignments(else_text)
 
+        # Track the BASE name (a memory element `mem[waddr]` is driven via its
+        # array `mem`) so classification and the multi-driver check see `mem`.
         for var, _ in reset_assigns + normal_assigns:
-            self.seq_vars.add(var)
+            self.seq_vars.add(self._lhs_base(var))
 
         return reset_assigns, normal_assigns
 
@@ -895,7 +937,13 @@ class RTLTLACompiler:
         if internal_regs:
             out.append("    // Internal registers")
             for v in internal_regs:
-                out.append(f"    reg  {self._range(v)}{v};")
+                if self._is_memory(v):
+                    # Memory array: `reg [w-1:0] mem [0:depth-1];` (register file).
+                    out.append(
+                        f"    reg  {self._range(v)}{v} [0:{self.depths[v] - 1}];"
+                    )
+                else:
+                    out.append(f"    reg  {self._range(v)}{v};")
             out.append("")
 
         # --- Combinational block ---
