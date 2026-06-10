@@ -47,6 +47,12 @@ TIER1_RULE_NAMES = {
     "SequentialComposition",
     "IntroduceVariable",
     "Initialization",
+    # Verified loop-introduction rule (Morgan/Back iteration). It IS in the live
+    # registry but is INERT until a spec carries the `spec_statement` marker, and
+    # it is intentionally NOT advertised in any Stage-3 pass prompt yet (the
+    # prompt-vs-allowed tests below are unaffected because the prompts never name
+    # it). Keep it here so the registry-membership assertion stays exact.
+    "LoopIntroduction",
 }
 
 EXPECTED_PASS_NAMES = [
@@ -131,9 +137,10 @@ _KNOWN_BAD_NAMES = {
 # (1) Registry == the six Tier-1 names
 # ---------------------------------------------------------------------------
 
-def test_rule_registry_is_exactly_the_six_tier1_names():
-    """The live rule registry equals the six Tier-1 rule class names — nothing
-    more (no hallucinated rules) and nothing less."""
+def test_rule_registry_is_exactly_the_tier1_names():
+    """The live rule registry equals the Tier-1 rule class names — nothing more
+    (no hallucinated rules) and nothing less. (Now seven: the original six plus the
+    verified loop-introduction rule LoopIntroduction.)"""
     assert _registry_names() == TIER1_RULE_NAMES
 
 

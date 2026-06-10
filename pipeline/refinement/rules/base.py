@@ -32,7 +32,26 @@ class RefinementRule(ABC):
                 "sequential_steps": [  # added by SequentialComposition
                     {"name": str, "guard": str, "updates": [...]}
                 ],
-                "clocked": bool      # set by Iteration
+                "clocked": bool,     # set by Iteration
+
+                # --- LoopIntroduction marker (a Morgan specification statement) ---
+                # "spec_statement": True marks an action as an ABSTRACT spec
+                # statement (e.g. product' = a*b) that has NOT yet been refined into
+                # a concrete register loop — it states a postcondition over still-
+                # abstract target variable(s), not a clocked update. LoopIntroduction
+                # is the only rule that fires on it: it refines the statement into a
+                # verified shift-add/iterative loop and clears this marker. (Distinct
+                # from Iteration, which only sets clocked=True on a concrete action.)
+                "spec_statement": bool,
+                "postcondition": str,  # the abstract post the loop must establish
+
+                # Recorded by LoopIntroduction once the obligations are discharged
+                # (audit trail + signal to the critic that this loop is verified):
+                "refinement": {
+                    "invariant": str, "variant": str, "guard": str,
+                    "mode": str, "cases_checked": int,
+                    "obligations": {"O1": bool, "O2": bool, "O3": bool},
+                }
             }
         ],
         "init": str,                 # TLA+ Init predicate

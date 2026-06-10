@@ -4,6 +4,7 @@ from .sequential_composition import SequentialComposition
 from .assignment import Assignment
 from .alternation import Alternation
 from .introduce_variable import IntroduceVariable
+from .loop_introduction import LoopIntroduction
 
 TIER1_RULES = [
     Initialization(),
@@ -12,6 +13,7 @@ TIER1_RULES = [
     Assignment(),
     Alternation(),
     IntroduceVariable(),
+    LoopIntroduction(),
 ]
 
 __all__ = [
@@ -21,5 +23,6 @@ __all__ = [
     "Assignment",
     "Alternation",
     "IntroduceVariable",
+    "LoopIntroduction",
     "TIER1_RULES",
 ]
