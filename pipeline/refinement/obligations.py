@@ -1,4 +1,4 @@
-"""
+r"""
 Deterministic obligation kernel for verified loop-introduction refinement.
 
 WHAT THIS IS
@@ -61,9 +61,24 @@ import os
 from dataclasses import dataclass, field
 
 # Reuse the pipeline's REAL evaluator: the exact semantics Compiler 2 emits.
-# (spec_sim imports only pipeline.refinement.bridge -> pipeline.schemas; no cycle
-# back into the engine or the rules registry, so importing it here is safe.)
-from pipeline.cocotb.spec_sim import _eval
+# LAZY binding (not a top-level import): spec_sim imports
+# pipeline.refinement.bridge, and importing ANY submodule of pipeline.refinement
+# first executes the package __init__, which eagerly loads engine -> rules ->
+# loop_introduction -> THIS module. A top-level import of spec_sim here
+# therefore deadlocks any import chain that touches spec_sim before
+# pipeline.refinement (e.g. `import pipeline.cocotb.soak` cold) — pinned by
+# tests/test_soak.py::test_cold_import_has_no_cycle.
+
+_EVAL = None
+
+
+def _eval(expr, state):
+    """The real spec_sim evaluator, bound on first use (see comment above)."""
+    global _EVAL
+    if _EVAL is None:
+        from pipeline.cocotb.spec_sim import _eval as real_eval
+        _EVAL = real_eval
+    return _EVAL(expr, state)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +274,7 @@ def _check_O1(valuations, invariant, init):
 
 
 def _check_O2(valuations, invariant, guard, variant, init, body, max_iters):
-    """O2: inv /\ guard => inv[body] /\ variant strictly decreases.
+    r"""O2: inv /\ guard => inv[body] /\ variant strictly decreases.
 
     Walk the reachable loop states for each input: invariant holds at entry, is
     preserved by the body, and the variant strictly decreases while the guard
@@ -312,7 +327,7 @@ def _check_O2(valuations, invariant, guard, variant, init, body, max_iters):
 
 
 def _check_O3(valuations, post, guard, invariant, init, body, mapping, max_iters):
-    """O3: inv /\ ~guard => post. Run to loop exit, bind each abstract variable via
+    r"""O3: inv /\ ~guard => post. Run to loop exit, bind each abstract variable via
     the data-refinement mapping (e.g. product := acc), then check the post."""
     for inputs in valuations:
         env = _apply_init(inputs, init)
