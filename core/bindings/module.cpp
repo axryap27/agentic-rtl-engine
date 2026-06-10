@@ -21,6 +21,7 @@
 
 #include "rtlcore/expr.hpp"
 #include "rtlcore/obligations.hpp"
+#include "rtlcore/spec_sim.hpp"
 
 namespace py = pybind11;
 using namespace rtlcore;
@@ -111,6 +112,76 @@ py::object eval_expr(const std::string& expr, const py::dict& env_dict) {
 }
 
 // ---------------------------------------------------------------------------
+// run_spec_sim — the native cycle engine
+// ---------------------------------------------------------------------------
+// The Python wrapper (pipeline/cocotb/spec_sim.py) does the one-time
+// composition + LHS parsing + input coercion + reset detection and passes the
+// pre-digested pieces; this boundary only converts and runs.
+
+py::list run_spec_sim_py(const py::dict& widths, const py::dict& depths,
+                         const py::list& clocked, const py::list& comb,
+                         const py::list& reset, const py::list& edges,
+                         const py::list& output_ports) {
+    SimSpec spec;
+    for (const auto& item : widths)
+        spec.widths.emplace_back(py::cast<std::string>(item.first),
+                                 py::cast<int>(item.second));
+    for (const auto& item : depths)
+        spec.depths.emplace_back(py::cast<std::string>(item.first),
+                                 py::cast<int>(item.second));
+    for (const auto& item : clocked) {
+        const auto t = py::cast<py::tuple>(item);
+        UpdateSpec u;
+        u.base = py::cast<std::string>(t[0]);
+        u.idx_expr = t[1].is_none() ? std::string()
+                                    : py::cast<std::string>(t[1]);
+        u.rhs = py::cast<std::string>(py::str(t[2]));
+        spec.clocked.push_back(std::move(u));
+    }
+    for (const auto& item : comb) {
+        const auto t = py::cast<py::tuple>(item);
+        spec.comb.emplace_back(py::cast<std::string>(t[0]),
+                               py::cast<std::string>(py::str(t[1])));
+    }
+    for (const auto& item : reset) {
+        const auto t = py::cast<py::tuple>(item);
+        spec.reset.emplace_back(py::cast<std::string>(t[0]),
+                                py::cast<std::string>(py::str(t[1])));
+    }
+
+    std::vector<EdgeIn> es;
+    es.reserve(edges.size());
+    for (const auto& item : edges) {
+        const auto t = py::cast<py::tuple>(item);
+        EdgeIn e;
+        for (const auto& kv : py::cast<py::dict>(t[0]))
+            e.inputs.emplace_back(py::cast<std::string>(kv.first),
+                                  to_value(kv.second));
+        e.is_reset = py::cast<bool>(t[1]);
+        e.observe = py::cast<bool>(t[2]);
+        es.push_back(std::move(e));
+    }
+    std::vector<std::string> outs;
+    outs.reserve(output_ports.size());
+    for (const auto& p : output_ports)
+        outs.push_back(py::cast<std::string>(p));
+
+    std::vector<Row> rows;
+    {
+        py::gil_scoped_release release;  // pure C++ cycle loop
+        rows = run_spec_sim(spec, es, outs);
+    }
+
+    py::list out;
+    for (const auto& row : rows) {
+        py::dict d;
+        for (const auto& [name, v] : row) d[py::str(name)] = from_value(v);
+        out.append(d);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // discharge_loop_obligations — the kernel
 // ---------------------------------------------------------------------------
 
@@ -170,6 +241,13 @@ PYBIND11_MODULE(_rtlcore, m) {
           "Evaluate one engine-spec expression against an env dict "
           "(int/bool/None/list values); returns int or None (X). Exact mirror "
           "of pipeline.cocotb.spec_sim._eval.");
+
+    m.def("run_spec_sim", &run_spec_sim_py, py::arg("widths"),
+          py::arg("depths"), py::arg("clocked"), py::arg("comb"),
+          py::arg("reset"), py::arg("edges"), py::arg("output_ports"),
+          "Run the native spec-simulator cycle loop on pre-composed updates "
+          "and pre-coerced edges; returns one outputs dict per observed edge "
+          "(X omitted). Exact-row mirror of SpecSimulator.run.");
 
     m.def("discharge_loop_obligations", &discharge, py::arg("post"),
           py::arg("invariant"), py::arg("variant"), py::arg("guard"),

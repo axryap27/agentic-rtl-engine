@@ -27,6 +27,7 @@ add_compile_options(-Wall -Wextra)
 add_library(rtlcore_lib STATIC
   src/expr.cpp
   src/obligations.cpp
+  src/spec_sim.cpp
 )
 target_include_directories(rtlcore_lib PUBLIC include)
 set_property(TARGET rtlcore_lib PROPERTY POSITION_INDEPENDENT_CODE ON)

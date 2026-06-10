@@ -18,11 +18,11 @@ _Last updated: 2026-06-09._
 | Diagnoser — failure classification + routing | built |
 | Refinement engine + eight rules (six Tier-1 + `LoopIntroduction` + `ScheduleHandshakeFSM`) | built; catch-all is the sole, replayable driver; robust to a throwing/cycling live picker; **verified derivation**: abstract spec statement → obligation-checked loop → scheduled FSMD |
 | Obligation kernel (`pipeline/refinement/obligations.py`) | built; discharges Morgan/Back O1/O2/O3 against the real expression semantics; honest `mode` (exhaustive-proof vs sampled) |
-| Native verification core (`core/`, optional) | built; C++ exact-verdict mirror of the evaluator + kernel, ~300× on the live-loop proof (23 s → 74 ms at 8-bit); auto-dispatch with pure-Python fallback |
+| Native verification core (`core/`, optional) | built; C++ exact-verdict mirror of the evaluator + obligation kernel (~300× on the live-loop proof, 23 s → 74 ms at 8-bit) **and the spec-sim cycle engine** (~0.8M edges/s, 20k-cycle FIFO 1.5 s → 25 ms); auto-dispatch with pure-Python fallback |
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** + **combinational outputs** + **FSM control / multi-cycle datapath** |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **438 passed, 0 xfailed** (+22 opt-in live-LLM tests, deselected by default) |
+| Deterministic test suite | **457 passed, 0 xfailed** (+22 opt-in live-LLM tests, deselected by default) |
 
 The deterministic spine runs **NL → RTL → cocotb PASS offline** on every design class below,
 with all LLM boundaries mocked, exercising the real engine, both compilers, and cocotb.
@@ -91,7 +91,14 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
   same mode/cases_checked/counterexamples, pinned by a 12,000-case differential fuzz + full
   result-equality tests (`tests/test_native_kernel.py`) — so chain replay is backend-independent.
   Auto-dispatch in `obligations.py` (`OBLIGATIONS_BACKEND` to force); pure-Python fallback when
-  not built (`core/build.sh`).
+  not built (`core/build.sh`). The same core also hosts the **spec-sim cycle engine**: Python
+  keeps the one-time composition (`SpecSimulator.__init__`, the bridge functions Compiler 2
+  shares); C++ runs the per-edge loop (reset pulse, comb fixpoint, read-before-write commits,
+  memory writes, width masks) at ~0.8M edges/s — exact-ROW mirror (`derive_expected(backend=)`,
+  `SPECSIM_BACKEND`), pinned by every fixture trace + a randomized-stimulus differential fuzz
+  (`tests/test_native_specsim.py`). Today's ~20-vector Stage-4 derivation was never slow; this
+  is what makes a future MASS spec-vs-RTL cross-check (thousands of random cycles per run)
+  affordable.
 
 ---
 

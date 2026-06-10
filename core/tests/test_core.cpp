@@ -11,6 +11,7 @@
 
 #include "rtlcore/expr.hpp"
 #include "rtlcore/obligations.hpp"
+#include "rtlcore/spec_sim.hpp"
 
 using namespace rtlcore;
 
@@ -252,6 +253,96 @@ static void test_kernel_empty_inputs() {
     CHECK(r.cases_checked == 1);
 }
 
+// --- spec-sim cycle engine ----------------------------------------------------
+
+static EdgeIn mk_edge(std::vector<std::pair<std::string, Value>> ins,
+                      bool is_reset, bool observe) {
+    EdgeIn e;
+    e.inputs = std::move(ins);
+    e.is_reset = is_reset;
+    e.observe = observe;
+    return e;
+}
+
+static const Value* row_get(const Row& row, const std::string& name) {
+    for (const auto& [n, v] : row)
+        if (n == name) return &v;
+    return nullptr;
+}
+
+static void test_specsim_counter_reset_comb_chain() {
+    SimSpec s;
+    s.widths = {{"count", 2}, {"flag", 1}, {"flag2", 1}};
+    s.clocked = {{"count", "", "count + 1"}};
+    s.comb = {{"flag", "count = 2"}, {"flag2", "flag"}};
+    s.reset = {{"count", "0"}};
+    std::vector<EdgeIn> edges{
+        mk_edge({}, true, false),   // reset pulse: assert (count <- 0)
+        mk_edge({}, false, false),  // deassert: one normal step (count <- 1)
+        mk_edge({}, false, true),   // v0: count 2, flag 1, flag2 1
+        mk_edge({}, false, true),   // v1: count 3, flag 0
+        mk_edge({}, false, true),   // v2: count 0 (2-bit wrap)
+        mk_edge({}, true, true),    // v3: mid-stream reset -> count 0
+    };
+    const auto rows = run_spec_sim(s, edges, {"count", "flag", "flag2"});
+    CHECK(rows.size() == 4);
+    CHECK(is_int(*row_get(rows[0], "count"), 2));
+    CHECK(is_int(*row_get(rows[0], "flag"), 1));
+    CHECK(is_int(*row_get(rows[0], "flag2"), 1));
+    CHECK(is_int(*row_get(rows[1], "count"), 3));
+    CHECK(is_int(*row_get(rows[1], "flag"), 0));
+    CHECK(is_int(*row_get(rows[2], "count"), 0));
+    CHECK(is_int(*row_get(rows[3], "count"), 0));  // reset branch drove it
+}
+
+static void test_specsim_memory_x_until_written_and_oor_drop() {
+    SimSpec s;
+    s.widths = {{"mem", 4}, {"rdata_reg", 4}};
+    s.depths = {{"mem", 3}};
+    // we=0 routes the write index out of range (7 >= depth 3): dropped, like
+    // the composed hold; rdata_reg is a registered read (old state).
+    s.clocked = {{"mem", "IF we = 1 THEN waddr ELSE 7", "wdata"},
+                 {"rdata_reg", "", "mem[raddr]"}};
+    std::vector<EdgeIn> edges{
+        mk_edge({{"we", Value::of(0)}, {"waddr", Value::of(0)},
+                 {"wdata", Value::of(0)}, {"raddr", Value::of(0)}}, true, false),
+        mk_edge({}, false, false),
+        // v0: write mem[1]=9; read of old mem[1] is X -> omitted
+        mk_edge({{"we", Value::of(1)}, {"waddr", Value::of(1)},
+                 {"wdata", Value::of(9)}, {"raddr", Value::of(1)}}, false, true),
+        // v1: no write; registered read now sees 9
+        mk_edge({{"we", Value::of(0)}}, false, true),
+        // v2: write to waddr=5 (out of range) silently dropped
+        mk_edge({{"we", Value::of(1)}, {"waddr", Value::of(5)}}, false, true),
+        // v3: X write address -> write skipped
+        mk_edge({{"we", Value::of(1)}, {"waddr", Value::X()}}, false, true),
+    };
+    const auto rows = run_spec_sim(s, edges, {"rdata_reg"});
+    CHECK(rows.size() == 4);
+    CHECK(row_get(rows[0], "rdata_reg") == nullptr);  // X omitted
+    CHECK(is_int(*row_get(rows[1], "rdata_reg"), 9));
+    CHECK(is_int(*row_get(rows[2], "rdata_reg"), 9));
+    CHECK(is_int(*row_get(rows[3], "rdata_reg"), 9));
+}
+
+static void test_specsim_input_hold_and_width_mask() {
+    SimSpec s;
+    s.widths = {{"acc", 4}};
+    s.clocked = {{"acc", "", "acc + din"}};
+    s.reset = {{"acc", "0"}};
+    std::vector<EdgeIn> edges{
+        mk_edge({{"din", Value::of(0)}}, true, false),
+        mk_edge({}, false, false),
+        mk_edge({{"din", Value::of(3)}}, false, true),   // acc 3
+        mk_edge({}, false, true),                        // din HOLDS 3 -> acc 6
+        mk_edge({{"din", Value::of(13)}}, false, true),  // 6+13=19 & 0xF = 3
+    };
+    const auto rows = run_spec_sim(s, edges, {"acc"});
+    CHECK(is_int(*row_get(rows[0], "acc"), 3));
+    CHECK(is_int(*row_get(rows[1], "acc"), 6));
+    CHECK(is_int(*row_get(rows[2], "acc"), 3));  // 4-bit commit mask
+}
+
 int main() {
     test_eval_basics();
     test_eval_u32_wraparound();
@@ -267,6 +358,9 @@ int main() {
     test_kernel_sampled_mode();
     test_kernel_sampled_underiterated();
     test_kernel_empty_inputs();
+    test_specsim_counter_reset_comb_chain();
+    test_specsim_memory_x_until_written_and_oor_drop();
+    test_specsim_input_hold_and_width_mask();
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) FAILED\n", failures);

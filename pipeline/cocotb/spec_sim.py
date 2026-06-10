@@ -39,6 +39,7 @@ exactly (see tests/test_spec_sim.py).
 
 from __future__ import annotations
 
+import os
 import re
 
 from pipeline.refinement.bridge import (
@@ -429,8 +430,154 @@ def derive_expected(
     output_ports: list[str],
     reset_port: str = "reset",
     reset_active_low: bool = False,
+    backend: str = "auto",
 ) -> list[dict]:
-    """Spec-derived expected outputs for each input vector (see SpecSimulator)."""
-    return SpecSimulator(engine_spec, reset_port, reset_active_low).run(
-        stimulus, output_ports
+    """Spec-derived expected outputs for each input vector (see SpecSimulator).
+
+    `backend` selects the implementation, NEVER the rows: "auto" (the native
+    cycle engine iff built — see core/ — else pure Python; the SPECSIM_BACKEND
+    env var may force a choice), "python", or "cpp" (raises if not built). Both
+    backends return identical rows by contract (tests/test_native_specsim.py),
+    so Stage 4 artifacts are backend-independent. The composition stays in
+    SpecSimulator.__init__ either way — the native engine only replaces the
+    per-edge loop.
+    """
+    sim = SpecSimulator(engine_spec, reset_port, reset_active_low)
+    native, strict = _resolve_backend(backend)
+    if native is not None:
+        rows = _run_native(native, sim, stimulus, output_ports, strict=strict)
+        if rows is not None:
+            return rows
+    return sim.run(stimulus, output_ports)
+
+
+# ---------------------------------------------------------------------------
+# Optional native cycle engine (core/ -> pipeline/refinement/_rtlcore*.so)
+# ---------------------------------------------------------------------------
+# Same pattern as pipeline/refinement/obligations.py: the compiled engine is an
+# EXACT-ROW mirror (pinned by tests/test_native_specsim.py — every fixture
+# design plus a randomized-stimulus differential fuzz), so which backend ran is
+# invisible in 02_vector_check.json / 04_evaluation.json. It exists for speed:
+# the Python loop re-parses every composed expression on every edge; the native
+# engine compiles each expression once — which is what makes MASS stimulus
+# cross-checks (thousands of cycles) affordable. The module cache below is
+# import memoisation (like sys.modules), not pipeline state.
+
+_NATIVE = None
+_NATIVE_TRIED = False
+
+
+def _native_core():
+    """The compiled core module, or None if not built. Absence is normal."""
+    global _NATIVE, _NATIVE_TRIED
+    if not _NATIVE_TRIED:
+        _NATIVE_TRIED = True
+        try:
+            from pipeline.refinement import _rtlcore  # type: ignore[attr-defined]
+            _NATIVE = _rtlcore
+        except ImportError:
+            _NATIVE = None
+    return _NATIVE
+
+
+def _resolve_backend(backend: str):
+    """Resolve a backend choice to (native_module_or_None, strict).
+
+    strict=True only for an EXPLICIT "cpp" request: out-of-domain stimulus
+    (negative ints) then raises instead of silently falling back to Python.
+    """
+    if backend == "auto":
+        backend = os.environ.get("SPECSIM_BACKEND", "auto")
+    if backend == "python":
+        return None, False
+    native = _native_core()
+    if backend == "cpp":
+        if native is None:
+            raise RuntimeError(
+                "SPECSIM_BACKEND=cpp but the native core is not built — "
+                "run core/build.sh (or unset the override)."
+            )
+        return native, True
+    if backend == "auto":
+        return native, False
+    raise ValueError(
+        f"unknown spec-sim backend {backend!r} "
+        "(expected 'auto', 'python' or 'cpp')"
+    )
+
+
+def specsim_backend() -> str:
+    """Which backend derive_expected(backend='auto') will use."""
+    native, _ = _resolve_backend("auto")
+    return "cpp" if native is not None else "python"
+
+
+def _run_native(native, sim: SpecSimulator, stimulus: list[dict],
+                output_ports: list[str], *, strict: bool):
+    """Digest the simulator's composed state for the native cycle engine.
+
+    Mirrors SpecSimulator.run's harness exactly: pre-coerced inputs (clk and
+    the reset port stripped — _set_inputs skips them), the two reset-pulse
+    edges driving every stimulus input name to 0, per-vector reset detection
+    from the RAW vector, the indexed-LHS pre-parse (hoisted: the regex is
+    deterministic per string), and the reset-update filter to scalar register
+    targets. Returns the output rows, or None to fall back to pure Python when
+    the stimulus is outside the native domain (a negative int — the engine-spec
+    value domain is unsigned)."""
+    reset_port = sim.reset_port
+
+    coerced: list[dict] = []
+    for vec in stimulus:
+        row = {}
+        for k, v in vec.items():
+            if k in ("clk", reset_port):
+                continue
+            cv = _coerce_input(v)
+            if isinstance(cv, int) and cv < 0:
+                if strict:
+                    raise ValueError(
+                        f"negative stimulus value {k}={cv!r} is unsupported "
+                        "by the native spec-sim backend (unsigned domain)"
+                    )
+                return None
+            row[k] = cv
+        coerced.append(row)
+
+    input_names = set()
+    for vec in stimulus:
+        input_names |= set(vec.keys())
+    input_names.discard("clk")
+    input_names.discard(reset_port)
+    zero_inputs = {n: 0 for n in input_names}
+
+    # (inputs, is_reset, observe) — the reset pulse, then one edge per vector.
+    edges: list[tuple[dict, bool, bool]] = [
+        (zero_inputs, True, False),
+        (zero_inputs, False, False),
+    ]
+    for vec, row in zip(stimulus, coerced):
+        edges.append((row, sim._is_reset_asserted(vec), True))
+
+    clocked: list[tuple[str, str | None, str]] = []
+    for lhs, expr in sim.clocked_updates:
+        m = _INDEXED_LHS_RE.match(lhs.strip())
+        if m:
+            clocked.append((m.group(1), m.group(2), expr))
+        else:
+            clocked.append((lhs, None, expr))
+
+    reset_updates: list[tuple[str, str]] = []
+    for lhs, expr in sim.reset_updates:
+        base = _lhs_base(lhs)
+        if base in sim.reg_vars:
+            reset_updates.append((base, expr))
+
+    return native.run_spec_sim(
+        widths={k: int(w) for k, w in sim.widths.items()},
+        depths={k: int(d) for k, d in sim.depths.items()},
+        clocked=clocked,
+        comb=list(sim.comb_updates),
+        reset=reset_updates,
+        edges=edges,
+        output_ports=list(output_ports),
     )

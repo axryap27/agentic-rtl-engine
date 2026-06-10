@@ -39,7 +39,9 @@ if ((${#sos[@]})); then
   echo "rtlcore: installed ${sos[*]##*/} -> pipeline/refinement/"
   (cd .. && "$PYTHON" - <<'EOF'
 from pipeline.refinement.obligations import kernel_backend
-print("rtlcore: obligations.py backend now:", kernel_backend())
+from pipeline.cocotb.spec_sim import specsim_backend
+print("rtlcore: obligations backend:", kernel_backend(),
+      "| spec-sim backend:", specsim_backend())
 EOF
   )
 else
