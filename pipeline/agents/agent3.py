@@ -283,6 +283,34 @@ When generating or revising a FormalSpec:
   but NOT the memory and NOT the flags. When refining, apply Iteration to the
   write, read, and counter transitions; leave the combinational Flags transition
   alone.
+- FSMD — A CONTROL FSM SEQUENCING A MULTI-CYCLE DATAPATH (e.g. a sequential
+  multiplier/divider, a serial CRC, any start/done compute that takes several
+  clocks). Model it as ONE clocked transition whose `updates` advance EVERY
+  register together each clock, plus a combinational `done` flag. Use a `state`
+  register with INTEGER-encoded states (IDLE=0, BUSY=1, DONE=2 — never symbolic
+  names) and a `count` register for the iteration counter. The handshake and the
+  per-state datapath all ride inside the flat else-if guard chains:
+    state':  IF state = 0 AND start = 1 THEN 1            (start: IDLE -> BUSY)
+             ELSE IF state = 1 AND count = 1 THEN 2       (last cycle -> DONE)
+             ELSE IF state = 1 THEN 1                     (stay BUSY)
+             ELSE IF state = 2 THEN 0 ELSE 0              (DONE -> IDLE; else idle)
+  Each datapath register LOADS on the start branch (`state = 0 AND start = 1`),
+  STEPS on the BUSY branch (`state = 1 ...`), and HOLDS otherwise — e.g. an
+  iteration counter `count`: `IF state = 0 AND start = 1 THEN <N> ELSE IF
+  state = 1 THEN count - 1 ELSE count`. Make `done` COMBINATIONAL: a Flags
+  transition `{"done": "state = 2"}` with `"combinational": true`. The operands
+  and `start` are FREE INPUTS. Refine with ONLY Initialization (reset the
+  datapath/FSM registers to 0) + Iteration on the single clocked step; the
+  combinational done is never iterated or reset.
+- SHIFT/BIT OPS ARE ARITHMETIC. There are NO `<<`, `>>`, bitwise `&`/`|`,
+  bit-select `x[0]`, part-select `x[7:4]`, or concatenation `{a,b}` operators —
+  they produce broken RTL. Express them with `* / %` instead: a LEFT shift by one
+  is `x * 2`, a RIGHT shift by one is `x / 2`, and the LOW BIT is `(x % 2) = 1`.
+  A shift-add multiplier is exactly this: each BUSY cycle, `IF (mplier % 2) = 1
+  THEN product + mcand ELSE product` for the accumulator, `mcand * 2` to shift
+  the multiplicand left, and `mplier / 2` to shift the multiplier right (give the
+  shifting multiplicand and the product enough width — 8x8 needs a 16-bit
+  product and a 16-bit shifting multiplicand).
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """

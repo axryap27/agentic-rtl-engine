@@ -108,6 +108,20 @@ Rules:
   unchanged. (4) the read-data output is a REGISTERED read with one cycle of
   latency (read-before-write: a value written this vector appears on the read-data
   output only on a later read vector). Write the "expected" sequence accordingly.
+- MULTI-CYCLE / START-DONE HANDSHAKE designs: for a design that takes SEVERAL
+  clocks to produce a result (a sequential multiplier/divider, a serial
+  transmitter, any compute with a `start` input and a `done`/`valid` output),
+  the result is NOT ready the cycle after start. Drive the stimulus as a
+  handshake: assert `start` (with the operands) for ONE vector, then HOLD `start`
+  low and keep the design idle for ENOUGH vectors to cover the computation
+  latency (e.g. an N-bit shift-add multiplier needs ~N busy cycles) before you
+  expect `done` high. Provide ONE input vector per clock across the whole busy
+  window. You do NOT need to hand-compute the multi-cycle result or the exact
+  latency cycle — focus on a correct STIMULUS (a clean start pulse, operands
+  present at start, then idle); the per-cycle expected outputs are verified
+  against the formal spec. After a `done` pulse, return to idle for a cycle before
+  starting the next operation. Keep the operand inputs as FREE INPUT ports (do not
+  treat internal datapath/state registers as ports).
 - Do NOT include explanatory text outside the JSON object.
 - Respond ONLY with the JSON object — no markdown, no commentary.
 """
