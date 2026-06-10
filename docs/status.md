@@ -29,7 +29,7 @@ with all LLM boundaries mocked, exercising the real engine, both compilers, and 
 
 ## Design classes
 
-Six classes, all offline-proven; five confirmed on a live LLM run (Agent 1 + Agent 3):
+Six classes, all offline-proven **and confirmed on a live LLM run** (Agent 1 + Agent 3):
 
 | Design | Live | Notes |
 |---|---|---|
@@ -38,7 +38,7 @@ Six classes, all offline-proven; five confirmed on a live LLM run (Agent 1 + Age
 | multi-op ALU | ✅ | free-input width inference (D2) |
 | 8-bit accumulator | ✅ `121027-760bd3` | clean after a 3-run arc (RC4–RC8); active-low `rst_n` confirmed live |
 | 8×8 register file | ✅ `155212-38cc17` | first **memory array**; clean on the first try |
-| 4-deep FIFO | codegen ✅ `181016` | first **combinational output**; live cocotb was a *false red* (one wrong Agent-1 vector) — now removed by the spec-derived cross-check |
+| 4-deep FIFO | ✅ `190407` | first **combinational output**; clean live cocotb PASS via the spec-derived bench. The cross-check caught **two** Agent-1 false reds (v10 `empty`, v19 `rd_data`) and surfaced them — no false green. (`181016` was the codegen-validated false-red run that motivated the cross-check.) |
 
 ---
 
@@ -67,10 +67,10 @@ Six classes, all offline-proven; five confirmed on a live LLM run (Agent 1 + Age
 
 ## Open / deferred
 
-- **FIFO live re-confirmation** — codegen is validated live; a metered re-run would confirm the
-  spec-derived cross-check end to end (it now passes *and* flags Agent 1's v10 slip). Optional.
 - **Disagreement → diagnoser** — an Agent-1/spec disagreement is surfaced but not yet *routed*
-  to the diagnoser as a candidate spec bug.
+  to the diagnoser as a candidate spec bug. The FIFO live re-run (`190407`) showed the value:
+  two genuine disagreements, both Agent-1 errors (false reds avoided), zero spec bugs — a
+  router would classify and close them automatically instead of leaving a flagged-pass banner.
 - **Tier-2 rules** — `ParallelComposition`, `ExpandFrame`/`ContractFrame`,
   `WeakenPrecondition`/`StrengthenPostcondition` are designed (see [background.md](background.md)),
   not implemented — needed beyond FSM+datapath.
