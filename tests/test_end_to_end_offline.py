@@ -636,3 +636,81 @@ def test_end_to_end_offline_fifo_cocotb(tmp_path, monkeypatch):
         f"phase={result.get('phase')} error={result.get('error')}\n"
         f"{result.get('raw', '')[-2000:]}"
     )
+
+
+# ===========================================================================
+# Sixth medium design — 8x8 sequential multiplier (FSMD: control + datapath)
+# ===========================================================================
+#
+# The first FSMD: a control FSM (IDLE/BUSY/DONE) sequencing an 8-cycle shift-add
+# datapath behind a start/done handshake. It is the first design that takes more
+# than one clock per result, and the first multi-cycle handshake — the canonical
+# "real hardware" control-over-datapath pattern. A green cocotb run proves the
+# FSM sequencing, the arithmetic shift/bit primitives (mplier%2, mcand*2,
+# mplier/2 — the pipeline has no shift/bit-select operators), the conditional
+# accumulate, and the combinational done flag are all functionally correct.
+
+_MUL_PROMPT = (
+    "Design an 8-bit by 8-bit sequential shift-add multiplier with a start input "
+    "and a done output: assert start with the two operands, and after the "
+    "multiply completes, done goes high with the 16-bit product."
+)
+
+
+def test_end_to_end_offline_multiplier_chain_completes(tmp_path, monkeypatch):
+    """Full graph on the FSMD multiplier: chain completes through Stage 3 with a
+    control FSM, a multi-cycle datapath, and a combinational done flag."""
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "multiplier", _MUL_PROMPT)
+
+    assert _status(artifact_dir, "01_summary.json") == "success"
+    assert _status(artifact_dir, "02_testbench_meta.json") == "success"
+    assert _status(artifact_dir, "02_formal_spec.json") == "success"
+    assert _status(artifact_dir, "03_rtl_output.json") == "success", (
+        "Stage 3 did not produce success RTL; "
+        f"03_rtl_output.json = {(artifact_dir / '03_rtl_output.json').read_text()[:500]}"
+    )
+
+    verilog = (artifact_dir / "output.v").read_text()
+    assert "output reg [15:0] product" in verilog       # 16-bit product accumulator
+    assert "assign done = state == 2;" in verilog         # combinational done flag
+    assert "output done" in verilog and "output reg done" not in verilog
+    assert "mcand * 2" in verilog and "mplier / 2" in verilog   # arithmetic shifts
+    assert "mplier % 2" in verilog                         # low-bit test
+    assert "always @(posedge clk)" in verilog
+    try:
+        verify_banlist(verilog)
+    except BanlistViolation as exc:  # pragma: no cover - failure path
+        pytest.fail(f"Generated multiplier RTL violates the banlist: {exc}")
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG, reason="iverilog not installed")
+def test_end_to_end_offline_multiplier_lints_clean(tmp_path, monkeypatch):
+    """The graph-generated multiplier Verilog lints clean under iverilog."""
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "multiplier", _MUL_PROMPT)
+    import subprocess
+    result = subprocess.run(
+        ["iverilog", "-Wall", "-t", "null", str(artifact_dir / "output.v")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated multiplier RTL failed iverilog lint:\n"
+        f"{result.stdout}\n{result.stderr}\n\n{(artifact_dir / 'output.v').read_text()}"
+    )
+
+
+@pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
+def test_end_to_end_offline_multiplier_cocotb(tmp_path, monkeypatch):
+    """Functional verification: the graph's FSMD multiplier RTL PASSes cocotb.
+
+    The headline proof for this design class. The vectors drive three multiplies
+    back to back (a start pulse + idle cycles each), asserting product + done per
+    cycle, including the 255*255 16-bit maximum and a zero operand. A PASS proves
+    the multi-cycle FSM sequencing and shift-add datapath are functionally correct.
+    """
+    artifact_dir = _seed_and_invoke(tmp_path, monkeypatch, "multiplier", _MUL_PROMPT)
+    result = _run_real_cocotb(artifact_dir, "multiplier", inject_timescale=True)
+    assert result.get("status") == "pass", (
+        "multiplier RTL failed cocotb (FSM + multi-cycle datapath):\n"
+        f"phase={result.get('phase')} error={result.get('error')}\n"
+        f"{result.get('raw', '')[-2000:]}"
+    )

@@ -863,6 +863,219 @@ def fifo_cocotb_trace() -> list[tuple[tuple[int, int, int], dict]]:
 
 
 # ===========================================================================
+# Fixture 6 — 8x8 sequential shift-add multiplier (control FSM + datapath)
+# ===========================================================================
+#
+# The first FSMD: a control FSM sequencing a multi-cycle datapath behind a
+# start/done handshake — the canonical "real hardware" pattern. An 8x8->16-bit
+# multiply is computed by the classic shift-add algorithm over 8 clocks:
+#
+#   state: IDLE(0) --start--> BUSY(1) x8 cycles --> DONE(2) --> IDLE(0)
+#   on load (IDLE & start): product=0, mcand=a, mplier=b, count=8
+#   each BUSY cycle: if mplier's low bit set, product += mcand;
+#                    then shift mcand left, shift mplier right, count--;
+#                    when count reaches 1, also go DONE (the 8th/MSB bit is
+#                    still processed on that cycle).
+#   done = COMBINATIONAL (state == 2); product is the 16-bit accumulator output.
+#
+# SHIFT/BIT PRIMITIVES VIA ARITHMETIC (load-bearing!)
+# ---------------------------------------------------
+# The expression pipeline has no <<, >>, bitwise &, bit-select, or concat. The
+# shift-add primitives are therefore expressed arithmetically — all SUPPORTED
+# end to end (bridge -> Compiler 2 -> spec_sim):
+#   mplier's low bit  ->  (mplier % 2) = 1     (% modulo)
+#   shift mcand left  ->  mcand * 2            (* by constant)
+#   shift mplier right->  mplier / 2           (/ by constant)
+# `mcand` is 16-bit so the left-shifts don't lose the high partial products.
+#
+# REFINEMENT: this is the SIMPLEST refinement of any medium design — a single
+# clocked `Step` transition (every register updates together each clock) plus a
+# combinational `done`. Reuses ONLY Initialization + Iteration; no new rule.
+# `start`, `a`, `b` are FREE INPUTS. state/count/mcand/mplier emit as extra
+# observability output regs (the summary lists only the real interface).
+#
+# MULTI-CYCLE VERIFICATION: each multiply spans 10 cocotb vectors (1 start + 8
+# BUSY + 1 DONE->IDLE), `done` pulsing at the 9th (index 8) of each block. The
+# spec-derived golden vectors make this tractable live — Agent 1 supplies only
+# the start/operand STIMULUS; spec_sim derives the per-cycle product/done.
+
+_MUL_DW = 8         # operand width
+_MUL_PW = 16        # product width (8+8)
+_MUL_CW = 4         # iteration counter 0..8 -> 4 bits
+_MUL_SW = 2         # state 0..2 -> 2 bits
+
+# Control FSM next-state (flat ELSE-IF priority chain).
+_MUL_STATE_NEXT = (
+    "IF state = 0 AND start = 1 THEN 1 "
+    "ELSE IF state = 1 AND count = 1 THEN 2 "
+    "ELSE IF state = 1 THEN 1 "
+    "ELSE IF state = 2 THEN 0 "
+    "ELSE 0"
+)
+# Accumulator: clear on load, conditionally add the (shifted) multiplicand each
+# BUSY cycle when the multiplier's current low bit is set, else hold.
+_MUL_PRODUCT_NEXT = (
+    "IF state = 0 AND start = 1 THEN 0 "
+    "ELSE IF state = 1 AND (mplier % 2) = 1 THEN product + mcand "
+    "ELSE product"
+)
+# Shifting multiplicand (left shift = *2); loaded from operand `a`.
+_MUL_MCAND_NEXT = (
+    "IF state = 0 AND start = 1 THEN a "
+    "ELSE IF state = 1 THEN mcand * 2 "
+    "ELSE mcand"
+)
+# Shifting multiplier (right shift = /2); loaded from operand `b`.
+_MUL_MPLIER_NEXT = (
+    "IF state = 0 AND start = 1 THEN b "
+    "ELSE IF state = 1 THEN mplier / 2 "
+    "ELSE mplier"
+)
+# Iteration counter: load 8 on start, decrement each BUSY cycle, else hold.
+_MUL_COUNT_NEXT = (
+    "IF state = 0 AND start = 1 THEN 8 "
+    "ELSE IF state = 1 THEN count - 1 "
+    "ELSE count"
+)
+
+
+def multiplier_formal_spec() -> FormalSpec:
+    """FormalSpec for the 8x8 sequential shift-add multiplier (the LLM-facing form).
+
+    All datapath registers update together in one clocked `Step` transition whose
+    `updates` carry the guarded next-state chains; `done` is a combinational flag.
+    Refinement adds reset (Initialization) and clocking (Iteration on Step) — the
+    combinational DoneFlag is born concrete and never iterated or reset.
+    """
+    return FormalSpec(
+        module_name="multiplier",
+        description=(
+            "8x8 sequential shift-add multiplier with a start/done handshake. A "
+            "control FSM (IDLE/BUSY/DONE) sequences an 8-cycle shift-add datapath: "
+            "on start it loads the operands, each BUSY cycle conditionally adds the "
+            "shifted multiplicand and shifts, and after 8 cycles asserts a "
+            "combinational done with the 16-bit product. Synchronous reset returns "
+            "to IDLE with the datapath cleared."
+        ),
+        variables={
+            "product": {"type": "Nat", "width": _MUL_PW},
+            "mcand":   {"type": "Nat", "width": _MUL_PW},
+            "mplier":  {"type": "Nat", "width": _MUL_DW},
+            "count":   {"type": "Nat", "width": _MUL_CW},
+            "state":   {"type": "Nat", "width": _MUL_SW},
+            "done":    {"type": "Bit", "width": 1},
+        },
+        initial={"product": "0", "mcand": "0", "mplier": "0", "count": "0", "state": "0"},
+        transitions=[
+            {"label": "Step", "condition": "TRUE", "updates": {
+                "state":   _MUL_STATE_NEXT,
+                "product": _MUL_PRODUCT_NEXT,
+                "mcand":   _MUL_MCAND_NEXT,
+                "mplier":  _MUL_MPLIER_NEXT,
+                "count":   _MUL_COUNT_NEXT,
+            }},
+            {"label": "DoneFlag", "condition": "TRUE", "combinational": True,
+             "updates": {"done": "state = 2"}},
+        ],
+        invariants=["state \\in 0..2", "count \\in 0..8"],
+    )
+
+
+def multiplier_summary() -> SpecSummary:
+    """SpecSummary (Stage-1 form) for the sequential multiplier.
+
+    The interface is start/a/b (inputs) -> product/done (outputs); the FSM state
+    and datapath scratch registers are internal (emitted as observability outputs
+    the bench ignores). Test vectors drive the start/operand stimulus and assert
+    product+done every cycle, from the cycle-accurate reference model.
+    """
+    return SpecSummary(
+        module_name="multiplier",
+        description="8x8 sequential shift-add multiplier with start/done handshake.",
+        ports=[
+            {"name": "clk", "direction": "input", "width": 1},
+            {"name": "reset", "direction": "input", "width": 1},
+            {"name": "start", "direction": "input", "width": 1},
+            {"name": "a", "direction": "input", "width": _MUL_DW},
+            {"name": "b", "direction": "input", "width": _MUL_DW},
+            {"name": "product", "direction": "output", "width": _MUL_PW},
+            {"name": "done", "direction": "output", "width": 1},
+        ],
+        test_vectors=[
+            {"inputs": {"start": st, "a": a, "b": b}, "expected": exp}
+            for (st, a, b), exp in multiplier_cocotb_trace()
+        ],
+        reset_port="reset",
+        reset_active_low=False,
+    )
+
+
+def multiplier_picker_sequence() -> list[tuple[str, dict]]:
+    """Init (reset the datapath registers) then Iteration on the single clocked
+    `Step` transition. The combinational DoneFlag is never iterated — only the
+    existing Tier-1 rules are used (the simplest medium-design refinement)."""
+    return [
+        ("Initialization", {
+            "reset_values": {"product": "0", "mcand": "0", "mplier": "0",
+                             "count": "0", "state": "0"},
+            "reset_action_name": "Reset"}),
+        ("Iteration", {"action_name": "Step"}),
+    ]
+
+
+def _multiplier_model(
+    stim: list[tuple[int, int, int]],
+) -> list[tuple[tuple[int, int, int], dict]]:
+    """Cycle-accurate reference model matching the generated RTL exactly.
+
+    Mirrors the cocotb generator: reset clears the registers, one reset-deassert
+    edge runs with inputs 0 (a no-op hold in IDLE), then one edge per vector.
+    Outputs are sampled AFTER each edge: product is the 16-bit accumulator and
+    done is combinational (state == DONE). All register updates are read-before-
+    write off the current state, exactly like the nonblocking RTL.
+    """
+    pmask, mmask, cmask = (1 << _MUL_PW) - 1, (1 << _MUL_DW) - 1, (1 << _MUL_CW) - 1
+    product = mcand = mplier = count = state = 0
+
+    def step(start: int, a: int, b: int) -> None:
+        nonlocal product, mcand, mplier, count, state
+        if state == 0 and start == 1:
+            ns, npd, nmc, nmp, nc = 1, 0, a & pmask, b & mmask, 8
+        elif state == 1:
+            npd = (product + mcand) & pmask if (mplier % 2) == 1 else product
+            nmc = (mcand * 2) & pmask
+            nmp = (mplier // 2) & mmask
+            nc = (count - 1) & cmask
+            ns = 2 if count == 1 else 1
+        else:  # state == 2 (DONE) or any idle -> back to / stay IDLE, hold datapath
+            ns, npd, nmc, nmp, nc = 0, product, mcand, mplier, count
+        state, product, mcand, mplier, count = ns, npd, nmc, nmp, nc
+
+    step(0, 0, 0)  # reset-deassert edge (inputs 0)
+    out: list[tuple[tuple[int, int, int], dict]] = []
+    for (st, a, b) in stim:
+        step(st, a, b)
+        out.append(((st, a, b), {"product": product, "done": 1 if state == 2 else 0}))
+    return out
+
+
+def _mul_stimulus() -> list[tuple[int, int, int]]:
+    """(start, a, b) per cycle: three multiplications back to back, each a start
+    pulse + 9 idle cycles (8 BUSY + 1 DONE->IDLE). Covers a normal product, the
+    16-bit maximum (255*255), and a zero operand."""
+    stim: list[tuple[int, int, int]] = []
+    for a, b in [(13, 11), (255, 255), (0, 99)]:
+        stim.append((1, a, b))
+        stim.extend((0, 0, 0) for _ in range(9))
+    return stim
+
+
+def multiplier_cocotb_trace() -> list[tuple[tuple[int, int, int], dict]]:
+    """[((start,a,b), {product,done}), ...] for each cocotb vector."""
+    return _multiplier_model(_mul_stimulus())
+
+
+# ===========================================================================
 # Registry — convenient iteration for parametrized tests
 # ===========================================================================
 
@@ -900,6 +1113,13 @@ MEDIUM_DESIGNS: dict[str, dict] = {
         "summary": fifo_summary,
         "picker_sequence": fifo_picker_sequence,
         "cocotb_trace": fifo_cocotb_trace,
+        "has_free_inputs": True,
+    },
+    "multiplier": {
+        "formal_spec": multiplier_formal_spec,
+        "summary": multiplier_summary,
+        "picker_sequence": multiplier_picker_sequence,
+        "cocotb_trace": multiplier_cocotb_trace,
         "has_free_inputs": True,
     },
 }
