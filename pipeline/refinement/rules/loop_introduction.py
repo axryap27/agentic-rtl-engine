@@ -211,6 +211,20 @@ class LoopIntroduction(RefinementRule):
             "obligations": dict(result_check.obligations),
         }
 
+        # 3f. Record the loop STRUCTURE on the action so a downstream scheduler
+        #     (ScheduleHandshakeFSM) can mechanically turn the verified bare loop
+        #     into a clocked start/done handshake FSMD. The obligation audit above
+        #     is for the critic; this is the scheduler's input. In particular `init`
+        #     (the per-register LOAD values, e.g. {"product":"0","mcand":"a",...}) is
+        #     recorded NOWHERE else and the scheduler needs it for the load branch.
+        #     A deepcopy keeps the marker independent of the params dict (purity).
+        target_action["loop"] = {
+            "init": copy.deepcopy(params["init"]),
+            "body": copy.deepcopy(params["body"]),
+            "variant": params["variant"],
+            "guard": params["guard"],
+        }
+
         return result
 
     def describe(self) -> str:

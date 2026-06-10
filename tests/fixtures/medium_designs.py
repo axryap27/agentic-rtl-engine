@@ -1031,6 +1031,121 @@ def multiplier_picker_sequence() -> list[tuple[str, dict]]:
     ]
 
 
+# ===========================================================================
+# Abstract multiplier — the VERIFIED-DERIVATION form
+# ===========================================================================
+#
+# The concrete `multiplier` above hands the engine a fully-scheduled FSMD and
+# only adds reset + clocking. THIS fixture instead hands the engine an ABSTRACT
+# Morgan spec statement — one transition whose postcondition is `product = a * b`
+# over a still-abstract `product` — and DERIVES the scheduled FSMD with the
+# refinement calculus:
+#
+#   LoopIntroduction   discharges the iteration-rule obligations (O1/O2/O3) for
+#                      the shift-add invariant, then installs a verified bare
+#                      loop + records the loop structure (init/body/variant/guard).
+#   ScheduleHandshakeFSM  mechanically schedules that bare loop into the same
+#                      hardened IDLE/BUSY/DONE start/done FSMD as the concrete
+#                      fixture (a deterministic transform — no proof, no LLM).
+#   Initialization     adds the synchronous reset.
+#
+# The cocotb interface (ports + stimulus + expected trace) is IDENTICAL to the
+# concrete multiplier — `abstract_multiplier_summary` simply re-skins the proven
+# `multiplier_summary` with the derived module name — so the DERIVED RTL is
+# verified against the very same vectors. The picker_sequence below is the
+# derivation; it is what a correct pick_rule would emit.
+
+
+def abstract_multiplier_formal_spec() -> FormalSpec:
+    """FormalSpec for the multiplier as an ABSTRACT spec statement.
+
+    ONE transition, `spec_statement=True`, postcondition `product = a * b`, with
+    `product` still abstract (width 16). The bridge marks `product` abstract so
+    LoopIntroduction fires; the `updates` RHS carries the abstract relation as a
+    documentation placeholder (refinement replaces it). `a`/`b` are free inputs
+    (never declared as state) — the obligation kernel takes their widths via the
+    LoopIntroduction params, not the spec.
+    """
+    return FormalSpec(
+        module_name="shift_add_multiplier",
+        description=(
+            "8x8 multiplier specified abstractly as product = a * b (a Morgan "
+            "spec statement). The refinement engine DERIVES a verified shift-add "
+            "FSMD: LoopIntroduction discharges the iteration-rule obligations for "
+            "the shift-add invariant, ScheduleHandshakeFSM schedules the verified "
+            "loop into an IDLE/BUSY/DONE start/done datapath, and Initialization "
+            "adds synchronous reset."
+        ),
+        variables={
+            "product": {"type": "Nat", "width": _MUL_PW},
+        },
+        initial={},
+        transitions=[
+            {"label": "Multiply", "condition": "start = 1", "spec_statement": True,
+             "postcondition": "product = a * b",
+             "updates": {"product": "a * b"}},
+        ],
+        invariants=[],
+    )
+
+
+# The derivation chain (what a correct pick_rule emits). LoopIntroduction's params
+# are the shift-add proposal: invariant `product + mplier*mcand = a*b`, variant
+# `count`, loaded {product:0, mcand:a, mplier:b, count:8}, one shift-add step.
+#
+# NOTE: input_widths is 6-bit (a,b in 0..63) ONLY to keep the obligation check
+# fast in the test suite — exhaustive over 2^(6+6)=4096 (a,b) pairs, ~1s — rather
+# than 8-bit (2^16=65536, slow). The shift-add invariant is width-GENERIC: the
+# 6-bit proof certifies the same algebraic identity that the 8-bit datapath runs.
+# count is loaded to 8 either way (8 iterations cover 8-bit operands), and the
+# generated RTL is the full 8-bit datapath (the cocotb interface drives 8-bit a/b).
+_ABS_MUL_INIT = {"product": "0", "mcand": "a", "mplier": "b", "count": "8"}
+_ABS_MUL_BODY = {
+    "product": "IF (mplier % 2) = 1 THEN product + mcand ELSE product",
+    "mcand": "mcand * 2",
+    "mplier": "mplier / 2",
+    "count": "count - 1",
+}
+_ABS_MUL_LOOP_PARAMS = {
+    "action_name": "Multiply",
+    "postcondition": "product = a * b",
+    "invariant": "product + mplier * mcand = a * b",
+    "variant": "count",
+    "guard": "count > 0",
+    "init": _ABS_MUL_INIT,
+    "body": _ABS_MUL_BODY,
+    "mapping": {"product": "product"},
+    "fresh_vars": [
+        {"name": "mcand", "width": 16},
+        {"name": "mplier", "width": 8},
+        {"name": "count", "width": 4},
+    ],
+    "input_widths": {"a": 6, "b": 6},   # 6-bit => exhaustive proof, fast (see NOTE)
+}
+
+
+def abstract_multiplier_picker_sequence() -> list[tuple[str, dict]]:
+    """The verified DERIVATION: introduce the verified loop, schedule it into the
+    handshake FSMD, then add reset. This is what a correct pick_rule emits."""
+    return [
+        ("LoopIntroduction", _ABS_MUL_LOOP_PARAMS),
+        ("ScheduleHandshakeFSM", {"action_name": "Multiply"}),
+        ("Initialization", {
+            "reset_values": {"product": "0", "mcand": "0", "mplier": "0",
+                             "count": "0", "state": "0"},
+            "reset_action_name": "Reset"}),
+    ]
+
+
+def abstract_multiplier_summary() -> SpecSummary:
+    """Stage-1 summary for the DERIVED multiplier: identical interface, stimulus,
+    and expected trace as the concrete multiplier — only the module name differs —
+    so the derived RTL is verified against the very same cocotb vectors."""
+    summ = multiplier_summary().model_dump()
+    summ["module_name"] = "shift_add_multiplier"
+    return SpecSummary.model_validate(summ)
+
+
 def _multiplier_model(
     stim: list[tuple[int, int, int]],
 ) -> list[tuple[tuple[int, int, int], dict]]:
@@ -1138,6 +1253,16 @@ MEDIUM_DESIGNS: dict[str, dict] = {
         "formal_spec": multiplier_formal_spec,
         "summary": multiplier_summary,
         "picker_sequence": multiplier_picker_sequence,
+        "cocotb_trace": multiplier_cocotb_trace,
+        "has_free_inputs": True,
+    },
+    # The verified-derivation form: an abstract product=a*b spec statement that the
+    # engine DERIVES into the same FSMD via LoopIntroduction + ScheduleHandshakeFSM
+    # + Initialization. Reuses the concrete multiplier's interface/stimulus/trace.
+    "abstract_multiplier": {
+        "formal_spec": abstract_multiplier_formal_spec,
+        "summary": abstract_multiplier_summary,
+        "picker_sequence": abstract_multiplier_picker_sequence,
         "cocotb_trace": multiplier_cocotb_trace,
         "has_free_inputs": True,
     },

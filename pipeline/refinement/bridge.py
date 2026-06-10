@@ -693,6 +693,19 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             for k in t.updates.keys():
                 comb_targets.add(_lhs_base(k))
 
+    # A spec-statement transition (Transition.spec_statement) is an ABSTRACT Morgan
+    # spec statement (e.g. product' = a*b): its target variable(s) must be born
+    # ABSTRACT so LoopIntroduction's is_applicable fires (it refines the statement
+    # into a verified concrete loop). Collect their base names; they take priority
+    # over the default born-concrete path. A variable is never both combinational
+    # and a spec-statement target (a spec statement is the abstract pre-image of a
+    # clocked datapath, not a wire), so the two sets do not overlap in practice.
+    spec_stmt_targets: set[str] = set()
+    for t in spec.transitions:
+        if getattr(t, "spec_statement", False):
+            for k in t.updates.keys():
+                spec_stmt_targets.add(_lhs_base(k))
+
     variables = [
         {
             "name": name,
@@ -709,7 +722,10 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             # wire, not a register: born concrete (abstract=False, never Iterated),
             # never reset. is_rtl_style honours both flags.
             "combinational": name in comb_targets,
-            "abstract": name not in comb_targets,
+            # A spec-statement target is born ABSTRACT (so LoopIntroduction fires);
+            # otherwise a variable is concrete iff it is a combinational wire, abstract
+            # otherwise (the default). Spec-statement targets win over the comb path.
+            "abstract": (name in spec_stmt_targets) or (name not in comb_targets),
             "reset_value": None,
             "clocked": False,
         }
@@ -735,6 +751,16 @@ def formal_spec_to_engine_spec(spec: FormalSpec) -> dict:
             # never a clocked register update. Iteration skips it; is_rtl_style
             # accepts it unclocked.
             "combinational": bool(getattr(t, "combinational", False)),
+            # A spec-statement transition (an abstract Morgan spec statement, e.g.
+            # product' = a*b) carries its marker + postcondition onto the engine
+            # action so LoopIntroduction.is_applicable fires (it keys off
+            # action["spec_statement"]) and discharges the postcondition. The
+            # default (concrete) path leaves both absent — untouched.
+            **(
+                {"spec_statement": True, "postcondition": t.postcondition}
+                if getattr(t, "spec_statement", False)
+                else {}
+            ),
         }
         for t in spec.transitions
     ]

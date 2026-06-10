@@ -31,6 +31,15 @@ class Transition(BaseModel):
     #                             `assign` (e.g. a FIFO `full = count == DEPTH` flag), born concrete,
     #                             never clocked (Iteration), and never reset. Clocked transitions (the
     #                             default) become `always @(posedge clk)` register updates.
+    spec_statement: bool = False  # if True, this transition is an ABSTRACT specification statement (a
+    #                             Morgan spec statement, e.g. product' = a*b): it states a POSTcondition
+    #                             over still-abstract target variable(s), NOT a concrete clocked update.
+    #                             The bridge marks its target variable(s) abstract so LoopIntroduction
+    #                             fires; that rule DERIVES a verified concrete loop (then the scheduler
+    #                             turns it into a clocked FSMD). `updates` may carry a placeholder RHS
+    #                             (the abstract relation) for documentation; refinement replaces it.
+    postcondition: Optional[str] = None  # the abstract post the loop must establish (e.g. "product = a*b").
+    #                             Used only when spec_statement=True; consumed by LoopIntroduction.
 
 
 # Produced by Agent 3 from JSON(S).

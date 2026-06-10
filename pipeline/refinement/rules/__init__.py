@@ -5,6 +5,7 @@ from .assignment import Assignment
 from .alternation import Alternation
 from .introduce_variable import IntroduceVariable
 from .loop_introduction import LoopIntroduction
+from .schedule_handshake_fsm import ScheduleHandshakeFSM
 
 TIER1_RULES = [
     Initialization(),
@@ -14,6 +15,7 @@ TIER1_RULES = [
     Alternation(),
     IntroduceVariable(),
     LoopIntroduction(),
+    ScheduleHandshakeFSM(),
 ]
 
 __all__ = [
@@ -24,5 +26,6 @@ __all__ = [
     "Alternation",
     "IntroduceVariable",
     "LoopIntroduction",
+    "ScheduleHandshakeFSM",
     "TIER1_RULES",
 ]

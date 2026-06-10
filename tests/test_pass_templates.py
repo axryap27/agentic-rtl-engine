@@ -53,6 +53,12 @@ TIER1_RULE_NAMES = {
     # prompt-vs-allowed tests below are unaffected because the prompts never name
     # it). Keep it here so the registry-membership assertion stays exact.
     "LoopIntroduction",
+    # Handshake-FSM scheduler — the second half of the verified-derivation chain.
+    # Also in the live registry and also INERT until an action carries the `loop`
+    # marker (set by LoopIntroduction once its obligations discharge); likewise not
+    # advertised in any Stage-3 pass prompt yet, so the prompt-vs-allowed tests are
+    # unaffected. Keep it here so the registry-membership assertion stays exact.
+    "ScheduleHandshakeFSM",
 }
 
 EXPECTED_PASS_NAMES = [
@@ -139,8 +145,9 @@ _KNOWN_BAD_NAMES = {
 
 def test_rule_registry_is_exactly_the_tier1_names():
     """The live rule registry equals the Tier-1 rule class names — nothing more
-    (no hallucinated rules) and nothing less. (Now seven: the original six plus the
-    verified loop-introduction rule LoopIntroduction.)"""
+    (no hallucinated rules) and nothing less. (Now eight: the original six plus the
+    verified loop-introduction rule LoopIntroduction and the handshake-FSM scheduler
+    ScheduleHandshakeFSM.)"""
     assert _registry_names() == TIER1_RULE_NAMES
 
 

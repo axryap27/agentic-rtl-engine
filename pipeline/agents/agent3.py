@@ -308,6 +308,27 @@ When generating or revising a FormalSpec:
   and `start` are FREE INPUTS. Refine with ONLY Initialization (reset the
   datapath/FSM registers to 0) + Iteration on the single clocked step; the
   combinational done is never iterated or reset.
+- ABSTRACT-SPEC AUTHORING (the VERIFIED-REFINEMENT path). When the design is a
+  pure arithmetic / algorithmic FUNCTION under a resource constraint that implies
+  a SEQUENTIAL (multi-cycle) implementation — a sequential multiplier, a divider,
+  a serial CRC, any "compute f(a,b) over several clocks" datapath — you MAY author
+  an ABSTRACT specification statement and let the refinement engine DERIVE the
+  datapath, instead of hand-writing the shift-add chains. Author it as a single
+  transition with:
+    "spec_statement": true,
+    "condition": "TRUE",
+    "updates": {"<output>": "<postcondition relation>"}   // e.g. {"product": "a * b"}
+  and add a top-level "postcondition" field on that transition stating the relation
+  the implementation must establish (e.g. "product = a * b"). Declare the target
+  output variable(s) but leave them ABSTRACT — the refinement engine makes them
+  concrete by deriving and VERIFYING the loop. The operands (a, b) and `start` are
+  FREE INPUTS; do NOT author them as variables. Reset and the handshake (`state`,
+  `done`) are introduced by the refinement RULES, not by you — do NOT author them
+  in the abstract spec. CONTRAST: the concrete FSMD recipe just above (hand-writing
+  the shift-add chains in a clocked transition) remains valid and is still the right
+  choice for designs you can author directly; the abstract form is the NEW option
+  that yields a machine-VERIFIED datapath — prefer it for sequential arithmetic
+  functions where you can state the postcondition relation cleanly.
 - SHIFT/BIT OPS ARE ARITHMETIC. There are NO `<<`, `>>`, bitwise `&`/`|`,
   bit-select `x[0]`, part-select `x[7:4]`, or concatenation `{a,b}` operators —
   they produce broken RTL. Express them with `* / %` instead: a LEFT shift by one
@@ -317,6 +338,35 @@ When generating or revising a FormalSpec:
   the multiplicand left, and `mplier / 2` to shift the multiplier right (give the
   shifting multiplicand and the product enough width — 8x8 needs a 16-bit
   product and a 16-bit shifting multiplicand).
+- PROPOSING THE DERIVATION (when picking a rule on an abstract spec statement).
+  When you are refining an abstract spec statement (a transition carrying
+  `spec_statement: true` with a `postcondition`) and `LoopIntroduction` is in the
+  applicable set, pick it and PROPOSE its params: `action_name` (the spec-statement
+  action), `postcondition` (the relation to establish), `invariant`, `variant`,
+  `guard`, `init`, `body`, `mapping`, `fresh_vars`, `input_widths`. For a shift-add
+  multiplier of `product = a * b`:
+    action_name:   the abstract spec-statement action (e.g. "Compute")
+    postcondition: "product = a * b"
+    invariant:     "product + mplier * mcand = a * b"
+    variant:       "count"
+    guard:         "count > 0"
+    init:          {"product": "0", "mcand": "a", "mplier": "b", "count": "N"}
+    body:          {"product": "IF (mplier % 2) = 1 THEN product + mcand ELSE product",
+                    "mcand": "mcand * 2", "mplier": "mplier / 2", "count": "count - 1"}
+    mapping:       {"product": "product"}   (the accumulator IS the output)
+    fresh_vars:    [mcand, mplier, count] with their bit widths
+    input_widths:  the operand port widths (from a, b)
+  (N is the operand bit width; reuse the SHIFT/BIT-ARE-ARITHMETIC rule above —
+  `*2` left-shift, `/2` right-shift, `(x % 2) = 1` low bit.) The engine AUTO-CHECKS
+  these obligations against the real semantics and REJECTS a wrong invariant or
+  body (you will be re-prompted) — so propose the CORRECT loop invariant, not a
+  guess. After `LoopIntroduction` succeeds, the next applicable set will offer
+  `ScheduleHandshakeFSM` — pick it to schedule the verified loop onto the clocked
+  IDLE/BUSY/DONE start/done FSMD (params `{"action_name": <the loop action>}`).
+  Then pick `Initialization` to reset the loop and control registers to 0. So the
+  full verified derivation chain for a sequential multiplier is: abstract
+  `product = a * b` -> LoopIntroduction (propose invariant/body) ->
+  ScheduleHandshakeFSM -> Initialization.
 
 Respond ONLY with the requested JSON object — no markdown fences, no commentary.
 """
