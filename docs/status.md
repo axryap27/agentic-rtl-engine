@@ -16,11 +16,12 @@ _Last updated: 2026-06-09._
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
 | Stage 4 — cocotb simulation | built; **spec-derived golden-vector cross-check** (removes Agent-1 false reds; flags Agent-1/spec disagreements) |
 | Diagnoser — failure classification + routing | built |
-| Refinement engine + six Tier-1 rules | built; catch-all is the sole, replayable driver; robust to a throwing/cycling live picker |
+| Refinement engine + eight rules (six Tier-1 + `LoopIntroduction` + `ScheduleHandshakeFSM`) | built; catch-all is the sole, replayable driver; robust to a throwing/cycling live picker; **verified derivation**: abstract spec statement → obligation-checked loop → scheduled FSMD |
+| Obligation kernel (`pipeline/refinement/obligations.py`) | built; discharges Morgan/Back O1/O2/O3 against the real expression semantics; honest `mode` (exhaustive-proof vs sampled) |
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** + **combinational outputs** + **FSM control / multi-cycle datapath** |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **358 passed, 0 xfailed** |
+| Deterministic test suite | **383 passed, 0 xfailed** (+22 opt-in live-LLM tests, deselected by default) |
 
 The deterministic spine runs **NL → RTL → cocotb PASS offline** on every design class below,
 with all LLM boundaries mocked, exercising the real engine, both compilers, and cocotb.
@@ -71,6 +72,17 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
   on-disk chain is self-contained and replayable; a throwing/no-op `pick_rule` is a
   strike→backtrack, not a crash; the **RC4 port-direction gate** turns a false-green interface
   into a loud `partial` halt; the revise path clears the chain (RC6) for a replayable rebuild.
+- **Verified refinement (abstract → derived)** — an ABSTRACT Morgan spec statement
+  (`Transition.spec_statement`, e.g. `product' = a*b`) is refined into a concrete clocked loop
+  only after the obligation kernel discharges the iteration-rule obligations (O1 init⇒inv,
+  O2 inv∧guard⇒inv'∧variant↓, O3 inv∧¬guard⇒post) against the **real** expression semantics
+  (`spec_sim._eval`) — soundness from the CHECK, not the proposer. `LoopIntroduction` installs
+  the verified loop (failure = engine no-op → backtrack, with a counterexample);
+  `ScheduleHandshakeFSM` then mechanically schedules it onto the hardened IDLE/BUSY/DONE
+  start/done FSMD (body conditionals FLATTENED into the else-if chains). The discharged
+  obligations are recorded on the chain (`action["refinement"]`) as the derivation certificate.
+  E2E: abstract multiplier → exhaustive proof (4,096 cases) → derived RTL → real cocotb PASS;
+  a wrong invariant stalls the chain (`tests/test_verified_derivation.py`).
 
 ---
 
