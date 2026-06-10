@@ -28,3 +28,13 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_artifacts_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _disable_soak_by_default(monkeypatch):
+    """Stage 4's post-pass spec-vs-RTL soak (pipeline/cocotb/soak.py) defaults
+    to 2000 random cocotb cycles — right for a live run, but it would add a
+    multi-second soak to EVERY e2e test that reaches Stage 4. Disable it
+    globally; the dedicated soak tests pass n_cycles explicitly (which bypasses
+    the env) or re-set RTL_SOAK_CYCLES themselves."""
+    monkeypatch.setenv("RTL_SOAK_CYCLES", "0")

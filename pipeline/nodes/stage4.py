@@ -104,6 +104,36 @@ def run_stage4(state: PipelineState) -> PipelineState:
                     "either an Agent-1 vector error (a false red avoided) or a "
                     "spec/intent bug. Review 02_vector_check.json."
                 )
+            # ---- Mass spec-vs-RTL soak (post-pass cross-check) ----
+            # The directed bench passed; now soak the RTL against the refined
+            # spec on thousands of deterministic random cycles (the spec sim is
+            # nearly free natively). A soak FAILURE is a genuine spec-vs-RTL
+            # divergence the directed vectors missed — a deterministic pipeline
+            # bug, so it does NOT flip status (an Agent-3 revision retry would
+            # burn metered credits without fixing codegen): it is recorded here
+            # + 04_soak.json and surfaced loudly by main.py, exactly like a
+            # vector disagreement. Fail-soft: a skipped soak never breaks Stage 4.
+            try:
+                from pipeline.cocotb.soak import run_soak
+                soak = run_soak(artifact_dir, verilog_path, module_name)
+                if soak.get("status") == "failed":
+                    eval_artifact["soak"] = {
+                        "status": "failed",
+                        "cycles": soak.get("cycles"),
+                        "seed": soak.get("seed"),
+                        "num_failed_vectors": soak.get("num_failed_vectors"),
+                        "first_divergences": soak.get("first_divergences", []),
+                        "note": "spec-vs-RTL divergence on random soak — see 04_soak.json",
+                    }
+                elif soak.get("status") == "success":
+                    eval_artifact["soak"] = {
+                        "status": "success", "cycles": soak.get("cycles"),
+                        "seed": soak.get("seed"),
+                    }
+                # skipped soaks stay off the evaluation artifact (04_soak.json
+                # carries the reason) so the envelope stays minimal.
+            except Exception:
+                pass
             write_artifact(eval_path, eval_artifact)
         else:
             write_artifact(eval_path, {

@@ -118,6 +118,20 @@ def main() -> None:
                 )
             else:
                 print("[main] SUCCESS — RTL passed cocotb testbench.")
+            soak = eval_data.get("soak")
+            if soak and soak.get("status") == "failed":
+                print(
+                    f"[main] SOAK FAILURE — the RTL diverged from the refined spec "
+                    f"on the {soak.get('cycles')}-cycle random soak "
+                    f"({soak.get('num_failed_vectors')} failing vector(s); seed "
+                    f"{soak.get('seed')}). This is a genuine spec-vs-RTL bug "
+                    f"(codegen/composition), NOT an Agent error — review 04_soak.json."
+                )
+            elif soak and soak.get("status") == "success":
+                print(
+                    f"[main] Soak: RTL matched the spec on {soak.get('cycles')} "
+                    f"random cycles (seed {soak.get('seed')})."
+                )
         else:
             print(f"[main] FAIL — {eval_data.get('error', 'no detail')}")
     elif rtl_path.exists():
