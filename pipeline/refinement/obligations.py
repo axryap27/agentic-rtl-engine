@@ -57,12 +57,73 @@ in isolation. Documented limitation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 # Reuse the pipeline's REAL evaluator: the exact semantics Compiler 2 emits.
 # (spec_sim imports only pipeline.refinement.bridge -> pipeline.schemas; no cycle
 # back into the engine or the rules registry, so importing it here is safe.)
 from pipeline.cocotb.spec_sim import _eval
+
+
+# ---------------------------------------------------------------------------
+# Optional native backend (core/ -> pipeline/refinement/_rtlcore*.so)
+# ---------------------------------------------------------------------------
+# The compiled kernel is an EXACT-VERDICT mirror of the Python one (same
+# enumeration order, same mode/cases_checked, byte-identical counterexamples —
+# pinned by tests/test_native_kernel.py), so which backend ran is INVISIBLE in
+# the refinement audit and chain replay is backend-independent. It exists purely
+# for speed: Python re-parses every expression on every _eval call; the native
+# core compiles each expression once (~100x on the exhaustive sweeps, which run
+# on EVERY LoopIntroduction proposal, including failed ones during backtracking).
+#
+# Selection: the `backend` parameter ("auto" | "python" | "cpp"); when "auto",
+# the OBLIGATIONS_BACKEND env var may force a backend, else the native module is
+# used iff built (core/build.sh). The module cache below is import memoisation
+# (like sys.modules), not pipeline state.
+
+_NATIVE = None
+_NATIVE_TRIED = False
+
+
+def _native_kernel():
+    """The compiled kernel module, or None if not built. Absence is normal."""
+    global _NATIVE, _NATIVE_TRIED
+    if not _NATIVE_TRIED:
+        _NATIVE_TRIED = True
+        try:
+            from pipeline.refinement import _rtlcore  # type: ignore[attr-defined]
+            _NATIVE = _rtlcore
+        except ImportError:
+            _NATIVE = None
+    return _NATIVE
+
+
+def _resolve_backend(backend: str):
+    """Resolve a backend choice to the native module or None (= pure Python)."""
+    if backend == "auto":
+        backend = os.environ.get("OBLIGATIONS_BACKEND", "auto")
+    if backend == "python":
+        return None
+    native = _native_kernel()
+    if backend == "cpp":
+        if native is None:
+            raise RuntimeError(
+                "OBLIGATIONS_BACKEND=cpp but the native kernel is not built — "
+                "run core/build.sh (or unset the override)."
+            )
+        return native
+    if backend == "auto":
+        return native
+    raise ValueError(
+        f"unknown obligations backend {backend!r} "
+        "(expected 'auto', 'python' or 'cpp')"
+    )
+
+
+def kernel_backend() -> str:
+    """Which backend discharge_loop_obligations(backend='auto') will use."""
+    return "cpp" if _resolve_backend("auto") is not None else "python"
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +359,7 @@ def discharge_loop_obligations(
     input_widths: dict,
     exhaustive_threshold: int = 65536,
     max_iters: int = 64,
+    backend: str = "auto",
 ) -> ObligationResult:
     """Discharge the three loop-introduction obligations for a candidate
     derivation, over the input domain implied by `input_widths`.
@@ -309,7 +371,34 @@ def discharge_loop_obligations(
     `mode`: "exhaustive-proof" means every fixed-width input valuation was checked
     (a real proof over the input space); "sampled" means only a battery was checked
     (falsification only).
+
+    `backend` selects the implementation, NEVER the verdict: "auto" (the native
+    compiled kernel iff built, else pure Python; the OBLIGATIONS_BACKEND env var
+    may force a choice), "python", or "cpp" (raises if not built). Both backends
+    return identical results by contract (tests/test_native_kernel.py).
     """
+    native = _resolve_backend(backend)
+    if native is not None:
+        raw = native.discharge_loop_obligations(
+            post=post,
+            invariant=invariant,
+            variant=variant,
+            guard=guard,
+            init={k: str(v) for k, v in init.items()},
+            body={k: str(v) for k, v in body.items()},
+            mapping={k: str(v) for k, v in mapping.items()},
+            input_widths={k: int(v) for k, v in input_widths.items()},
+            exhaustive_threshold=exhaustive_threshold,
+            max_iters=max_iters,
+        )
+        return ObligationResult(
+            ok=raw["ok"],
+            mode=raw["mode"],
+            cases_checked=raw["cases_checked"],
+            obligations=dict(raw["obligations"]),
+            counterexample=raw["counterexample"],
+        )
+
     valuations, mode = _input_domain(input_widths, exhaustive_threshold)
 
     o1, cex = _check_O1(valuations, invariant, init)

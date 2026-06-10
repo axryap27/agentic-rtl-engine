@@ -2,6 +2,12 @@ artifacts/
 __pycache__/
 *.pyc
 .venv/
+
+# Native core build artifacts (sources live in core/; see core/README.md)
+core/build/
+core/.cache/
+pipeline/refinement/_rtlcore*.so
+compile_commands.json
 docs/TLA_specs.png
 docs/system_architecture.png
 
