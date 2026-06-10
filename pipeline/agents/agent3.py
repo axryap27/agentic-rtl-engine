@@ -290,14 +290,20 @@ When generating or revising a FormalSpec:
   register with INTEGER-encoded states (IDLE=0, BUSY=1, DONE=2 — never symbolic
   names) and a `count` register for the iteration counter. The handshake and the
   per-state datapath all ride inside the flat else-if guard chains:
-    state':  IF state = 0 AND start = 1 THEN 1            (start: IDLE -> BUSY)
-             ELSE IF state = 1 AND count = 1 THEN 2       (last cycle -> DONE)
-             ELSE IF state = 1 THEN 1                     (stay BUSY)
-             ELSE IF state = 2 THEN 0 ELSE 0              (DONE -> IDLE; else idle)
-  Each datapath register LOADS on the start branch (`state = 0 AND start = 1`),
-  STEPS on the BUSY branch (`state = 1 ...`), and HOLDS otherwise — e.g. an
-  iteration counter `count`: `IF state = 0 AND start = 1 THEN <N> ELSE IF
-  state = 1 THEN count - 1 ELSE count`. Make `done` COMBINATIONAL: a Flags
+    state':  IF (state = 0 OR state = 2) AND start = 1 THEN 1   (start in IDLE or DONE -> BUSY)
+             ELSE IF state = 1 AND count = 1 THEN 2             (last cycle -> DONE)
+             ELSE IF state = 1 THEN 1                           (stay BUSY)
+             ELSE IF state = 2 THEN 0 ELSE 0                    (DONE w/o start -> IDLE; else idle)
+  CRITICAL HANDSHAKE RULE: the load/restart guard must accept start when NOT BUSY
+  — i.e. in IDLE *or* DONE: `(state = 0 OR state = 2) AND start = 1`. DONE is a
+  single cycle, so a start pulse that coincides with the previous result's DONE
+  must RELOAD, not be dropped. An IDLE-only guard (`state = 0 AND start = 1`)
+  silently swallows a back-to-back start that lands in DONE and the next operation
+  never runs — do NOT write the load guard that way.
+  Each datapath register LOADS on the start branch (`(state = 0 OR state = 2) AND
+  start = 1`), STEPS on the BUSY branch (`state = 1 ...`), and HOLDS otherwise —
+  e.g. an iteration counter `count`: `IF (state = 0 OR state = 2) AND start = 1
+  THEN <N> ELSE IF state = 1 THEN count - 1 ELSE count`. Make `done` COMBINATIONAL: a Flags
   transition `{"done": "state = 2"}` with `"combinational": true`. The operands
   and `start` are FREE INPUTS. Refine with ONLY Initialization (reset the
   datapath/FSM registers to 0) + Iteration on the single clocked step; the

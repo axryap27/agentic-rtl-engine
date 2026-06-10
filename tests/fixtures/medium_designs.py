@@ -871,12 +871,20 @@ def fifo_cocotb_trace() -> list[tuple[tuple[int, int, int], dict]]:
 # multiply is computed by the classic shift-add algorithm over 8 clocks:
 #
 #   state: IDLE(0) --start--> BUSY(1) x8 cycles --> DONE(2) --> IDLE(0)
-#   on load (IDLE & start): product=0, mcand=a, mplier=b, count=8
+#   on load (start while NOT busy): product=0, mcand=a, mplier=b, count=8
 #   each BUSY cycle: if mplier's low bit set, product += mcand;
 #                    then shift mcand left, shift mplier right, count--;
 #                    when count reaches 1, also go DONE (the 8th/MSB bit is
 #                    still processed on that cycle).
 #   done = COMBINATIONAL (state == 2); product is the 16-bit accumulator output.
+#
+# HANDSHAKE (load-bearing!): the load fires on start while NOT BUSY — i.e. in
+# IDLE *or* DONE: `(state = 0 OR state = 2) AND start = 1`. Accepting start in
+# DONE is what makes back-to-back work: a start pulse that coincides with a
+# previous multiply's 1-cycle DONE reloads immediately instead of being silently
+# dropped. (The first live run used an IDLE-only load and DROPPED a start that
+# landed in DONE — the third multiply never ran; this is the fix, and the
+# stimulus below exercises a start landing in DONE.)
 #
 # SHIFT/BIT PRIMITIVES VIA ARITHMETIC (load-bearing!)
 # ---------------------------------------------------
@@ -894,10 +902,10 @@ def fifo_cocotb_trace() -> list[tuple[tuple[int, int, int], dict]]:
 # `start`, `a`, `b` are FREE INPUTS. state/count/mcand/mplier emit as extra
 # observability output regs (the summary lists only the real interface).
 #
-# MULTI-CYCLE VERIFICATION: each multiply spans 10 cocotb vectors (1 start + 8
-# BUSY + 1 DONE->IDLE), `done` pulsing at the 9th (index 8) of each block. The
-# spec-derived golden vectors make this tractable live — Agent 1 supplies only
-# the start/operand STIMULUS; spec_sim derives the per-cycle product/done.
+# MULTI-CYCLE VERIFICATION: each multiply is a start pulse + 8 BUSY cycles, with
+# `done` pulsing 8 cycles after its start (index 8 of the block). The spec-derived
+# golden vectors make this tractable live — Agent 1 supplies only the start/operand
+# STIMULUS; spec_sim derives the per-cycle product/done.
 
 _MUL_DW = 8         # operand width
 _MUL_PW = 16        # product width (8+8)
@@ -906,7 +914,7 @@ _MUL_SW = 2         # state 0..2 -> 2 bits
 
 # Control FSM next-state (flat ELSE-IF priority chain).
 _MUL_STATE_NEXT = (
-    "IF state = 0 AND start = 1 THEN 1 "
+    "IF (state = 0 OR state = 2) AND start = 1 THEN 1 "
     "ELSE IF state = 1 AND count = 1 THEN 2 "
     "ELSE IF state = 1 THEN 1 "
     "ELSE IF state = 2 THEN 0 "
@@ -915,25 +923,25 @@ _MUL_STATE_NEXT = (
 # Accumulator: clear on load, conditionally add the (shifted) multiplicand each
 # BUSY cycle when the multiplier's current low bit is set, else hold.
 _MUL_PRODUCT_NEXT = (
-    "IF state = 0 AND start = 1 THEN 0 "
+    "IF (state = 0 OR state = 2) AND start = 1 THEN 0 "
     "ELSE IF state = 1 AND (mplier % 2) = 1 THEN product + mcand "
     "ELSE product"
 )
 # Shifting multiplicand (left shift = *2); loaded from operand `a`.
 _MUL_MCAND_NEXT = (
-    "IF state = 0 AND start = 1 THEN a "
+    "IF (state = 0 OR state = 2) AND start = 1 THEN a "
     "ELSE IF state = 1 THEN mcand * 2 "
     "ELSE mcand"
 )
 # Shifting multiplier (right shift = /2); loaded from operand `b`.
 _MUL_MPLIER_NEXT = (
-    "IF state = 0 AND start = 1 THEN b "
+    "IF (state = 0 OR state = 2) AND start = 1 THEN b "
     "ELSE IF state = 1 THEN mplier / 2 "
     "ELSE mplier"
 )
 # Iteration counter: load 8 on start, decrement each BUSY cycle, else hold.
 _MUL_COUNT_NEXT = (
-    "IF state = 0 AND start = 1 THEN 8 "
+    "IF (state = 0 OR state = 2) AND start = 1 THEN 8 "
     "ELSE IF state = 1 THEN count - 1 "
     "ELSE count"
 )
@@ -1039,7 +1047,7 @@ def _multiplier_model(
 
     def step(start: int, a: int, b: int) -> None:
         nonlocal product, mcand, mplier, count, state
-        if state == 0 and start == 1:
+        if state != 1 and start == 1:        # load from IDLE *or* DONE (not BUSY)
             ns, npd, nmc, nmp, nc = 1, 0, a & pmask, b & mmask, 8
         elif state == 1:
             npd = (product + mcand) & pmask if (mplier % 2) == 1 else product
@@ -1047,7 +1055,7 @@ def _multiplier_model(
             nmp = (mplier // 2) & mmask
             nc = (count - 1) & cmask
             ns = 2 if count == 1 else 1
-        else:  # state == 2 (DONE) or any idle -> back to / stay IDLE, hold datapath
+        else:  # DONE with no start, or idle -> IDLE, hold the datapath
             ns, npd, nmc, nmp, nc = 0, product, mcand, mplier, count
         state, product, mcand, mplier, count = ns, npd, nmc, nmp, nc
 
@@ -1060,13 +1068,24 @@ def _multiplier_model(
 
 
 def _mul_stimulus() -> list[tuple[int, int, int]]:
-    """(start, a, b) per cycle: three multiplications back to back, each a start
-    pulse + 9 idle cycles (8 BUSY + 1 DONE->IDLE). Covers a normal product, the
-    16-bit maximum (255*255), and a zero operand."""
+    """(start, a, b) per cycle: three multiplies exercising both handshake paths.
+
+    Each multiply is a start pulse + 8 BUSY cycles, with `done` pulsing on the
+    8th idle cycle (index 8 after its start). The second start lands in the FIRST
+    multiply's DONE cycle (a true back-to-back) — the hardened handshake accepts
+    start in IDLE *or* DONE, so it reloads rather than dropping the start (the
+    live-run bug). The third uses a normal IDLE start after a gap. Covers a normal
+    product, the 16-bit maximum (255*255), a zero operand, and back-to-back."""
     stim: list[tuple[int, int, int]] = []
-    for a, b in [(13, 11), (255, 255), (0, 99)]:
-        stim.append((1, a, b))
-        stim.extend((0, 0, 0) for _ in range(9))
+    # mult 1: 13*11=143, start in IDLE; done at index 8.
+    stim.append((1, 13, 11)); stim.extend((0, 0, 0) for _ in range(8))
+    # mult 2: 255*255, start lands in mult-1's DONE cycle (back-to-back reload).
+    stim.append((1, 255, 255)); stim.extend((0, 0, 0) for _ in range(8))
+    # return to IDLE (DONE->IDLE, then idle), then mult 3 with a normal IDLE start.
+    stim.extend((0, 0, 0) for _ in range(2))
+    # mult 3: 0*99=0 (zero operand), start in IDLE.
+    stim.append((1, 0, 99)); stim.extend((0, 0, 0) for _ in range(8))
+    stim.append((0, 0, 0))
     return stim
 
 

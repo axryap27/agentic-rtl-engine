@@ -29,9 +29,9 @@ with all LLM boundaries mocked, exercising the real engine, both compilers, and 
 
 ## Design classes
 
-Seven classes, all offline-proven (NL → RTL → **real cocotb PASS**); six confirmed on a live
-LLM run (Agent 1 + Agent 3), the seventh (FSMD multiplier) offline-proven and awaiting its
-first live run:
+Seven classes, all offline-proven (NL → RTL → **real cocotb PASS**) and exercised on a live
+LLM run (Agent 1 + Agent 3). The FSMD multiplier's first live run additionally surfaced (via
+the spec-derived cross-check) and fixed a handshake bug — see its row:
 
 | Design | Live | Notes |
 |---|---|---|
@@ -41,7 +41,7 @@ first live run:
 | 8-bit accumulator | ✅ `121027-760bd3` | clean after a 3-run arc (RC4–RC8); active-low `rst_n` confirmed live |
 | 8×8 register file | ✅ `155212-38cc17` | first **memory array**; clean on the first try |
 | 4-deep FIFO | ✅ `190407` | first **combinational output**; clean live cocotb PASS via the spec-derived bench. The cross-check caught **two** Agent-1 false reds (v10 `empty`, v19 `rd_data`) and surfaced them — no false green. (`181016` was the codegen-validated false-red run that motivated the cross-check.) |
-| 8×8 sequential multiplier | offline ✅ | first **FSMD** — control FSM (IDLE/BUSY/DONE) sequencing a multi-cycle shift-add datapath behind a start/done handshake. Reuses ONLY Init + Iteration (no new rule); shift/bit ops via `*2`/`/2`/`%2`. Offline real-cocotb PASS (10 vectors/multiply, derived per-cycle by spec_sim). Awaiting one live run. |
+| 8×8 sequential multiplier | ✅ `195118` (+fix) | first **FSMD** — control FSM (IDLE/BUSY/DONE) sequencing a multi-cycle shift-add datapath behind a start/done handshake. Reuses ONLY Init + Iteration (no new rule); shifts via `*2`/`/2`/`%2`. Live run proved the multiplier correct across the full 16-bit range **and** the cross-check exposed a handshake bug — a `start` landing in the 1-cycle DONE was dropped (the 3rd multiply never ran). **Fixed:** the load accepts `start` in IDLE *or* DONE (true back-to-back), with a regression test. Hardened design offline-proven; a confirming re-run is optional. |
 
 ---
 

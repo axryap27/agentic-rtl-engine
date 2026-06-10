@@ -151,6 +151,32 @@ def test_multiplier_spec_sim_computes_products():
         assert out[i * 10 + 7]["done"] == 0
 
 
+def test_multiplier_handshake_accepts_start_in_done_back_to_back():
+    """REGRESSION (first live run): a start pulse that lands in the 1-cycle DONE
+    state must RELOAD (back-to-back), not be silently dropped. The hardened load
+    guard fires on start while NOT busy — IDLE or DONE. Here the second start
+    lands exactly in the first multiply's DONE cycle (index 9, since done pulses
+    at index 8); both multiplies must complete with correct products.
+
+    With the old IDLE-only guard the second start was eaten by the DONE->IDLE
+    transition and the product stayed stuck at the first result — the exact live
+    failure (255*255 never ran). This test would catch that regression."""
+    refined = _converge()
+    a1, b1, a2, b2 = 13, 11, 255, 255
+    stim = (
+        [{"start": 1, "a": a1, "b": b1}] + [{"start": 0, "a": 0, "b": 0}] * 8  # done @ v8
+        + [{"start": 1, "a": a2, "b": b2}] + [{"start": 0, "a": 0, "b": 0}] * 9  # start @ v9 (DONE)
+    )
+    out = derive_expected(refined, stim, ["product", "done"],
+                          reset_port="reset", reset_active_low=False)
+    done_cycles = [i for i, o in enumerate(out) if o.get("done") == 1]
+    assert done_cycles == [8, 17], (
+        f"expected done pulses at v8 and v17 (back-to-back), got {done_cycles} — "
+        "a single pulse means the second start was dropped (the live bug)")
+    assert out[8]["product"] == a1 * b1     # 13*11 = 143
+    assert out[17]["product"] == a2 * b2    # 255*255 = 65025, the multiply the live run dropped
+
+
 @pytest.mark.skipif(not _HAVE_COCOTB, reason="iverilog + cocotb-config required")
 def test_multiplier_cocotb(tmp_path):
     """Headline proof: the generated RTL PASSes a REAL cocotb run, driven by the
