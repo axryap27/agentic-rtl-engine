@@ -28,14 +28,21 @@ action space is the project's central defense against hallucination.
      → TLC model-check (optional)                 (deterministic, no LLM)
      → Refinement Engine lowers it,               (02_testbench.py,
         one rule at a time                          02_testbench_meta.json)
+        (abstract spec statement → obligation
+         kernel → LoopIntroduction →
+         ScheduleHandshakeFSM)
      → Compiler 2 → Verilog-2001
    (02_formal_spec.json, 03_rtl_output.json,
-    output.v, refinement_chain.json)
+    output.v, refinement_chain.json,
+    refinement_decisions.jsonl)
         │                                             │
         └────────┬────────────────────────────────────┘
                  ▼
-   Stage 4   cocotb runner  (Icarus Verilog)     (04_evaluation.json)
-             run output.v against the testbench  (deterministic, no LLM)
+   Stage 4   pre-flight: spec-derived vectors    (02_vector_check.json,
+             (independent spec interpreter)        02_testbench_specvec.py)
+             cocotb runner  (Icarus Verilog)     (04_evaluation.json)
+             run output.v vs spec-derived bench  (deterministic, no LLM)
+             post-pass: spec-vs-RTL random soak  (04_soak.json)
                  │
         pass ──► done (verified Verilog)
         fail ──► Diagnose ──► classify fault ──► revise spec  OR  backtrack refinement
@@ -43,15 +50,24 @@ action space is the project's central defense against hallucination.
 ```
 
 Three components call an LLM — **Agent 1**, **Agent 3**, and the **Diagnoser**.
-Everything else (Stage 2's generator, both compilers, the refinement engine, the
-cocotb runner) is deterministic Python.
+Everything else (Stage 2's generator, both compilers, the refinement engine and its
+obligation kernel, the spec simulator, the vector check, the soak, the cocotb runner)
+is deterministic code: pure Python, with an optional exact-mirror C++ native core
+(`core/`, pybind11 → `pipeline.refinement._rtlcore`) accelerating the expression
+evaluator, the obligation kernel, and the spec-sim cycle loop. Python stays the
+reference semantics and the fallback when the module is not built; both backends
+return identical verdicts and rows by contract, so which backend ran is invisible in
+the artifacts and replay is backend-independent.
 
 ---
 
 ## 2. The artifact chain
 
 Each stage reads its inputs and writes its outputs as JSON files under
-`artifacts/<run_id>/`. **LangGraph routes solely on the `status` field of the output
+`artifacts/<run_id>/`, where `run_id` is a date-stamped relative path —
+`<YYYY-MM-DD>/<HHMMSS>-<module>-<hash>/` (the module name is spliced in after the
+run; `artifacts/latest` always points at the most recent run — see
+`pipeline/run_dirs.py`). **LangGraph routes solely on the `status` field of the output
 JSON** — never on Python return values or exceptions. Every node must write a
 status-bearing artifact before returning, even on failure, or the router has nothing
 to act on.
@@ -59,13 +75,16 @@ to act on.
 | File | Written by | Read by | `status` values |
 |------|-----------|---------|-----------------|
 | `00_nl_spec.json` | user / `main.py` | Stage 1 | — (not a stage output) |
-| `01_summary.json` | Stage 1 (Agent 1) | Stage 2, Stage 3 | `success`, `error` |
+| `01_summary.json` | Stage 1 (Agent 1) | Stage 2, Stage 3, Stage 4 (vector check + soak) | `success`, `error` |
 | `02_testbench.py` + `02_testbench_meta.json` | Stage 2 (generator) | Stage 4 | `success`, `error` |
 | `02_formal_spec.json` | Stage 3 (Agent 3) | Stage 4, Diagnose | `success`, `error`, `partial` |
+| `02_vector_check.json` + `02_testbench_specvec.py` | Stage 4 (vector-check pre-flight) | Stage 4 (cocotb runs the specvec bench), review | — (not routed on) |
 | `03_rtl_output.json` (+ `output.v`) | Stage 3 (Compiler 2) | Stage 4, cocotb | `success`, `partial`, `error` |
 | `04_evaluation.json` | Stage 4 (cocotb runner) | terminal, Diagnose | `success`, `error` |
+| `04_soak.json` + `04_soak_testbench.py` | Stage 4 (soak post-pass) | review / debugging | — (not routed on) |
 | `04_diagnosis.json` | Diagnose node | LangGraph routing | `success`, `error` |
-| `refinement_chain.json` | Refinement Engine | debugging, Stage 3 (backtrack) | — (not routed on) |
+| `refinement_chain.json` | Refinement Engine | debugging, Stage 3 (backtrack), Stage 4 (vector check + soak replay it to reconstruct the refined spec) | — (not routed on) |
+| `refinement_decisions.jsonl` | Stage 3 (`pick_rule` log) | debugging | — (not routed on) |
 
 > The `02_` prefix on `02_formal_spec.json` reflects on-disk ordering, **not** which
 > stage produces it — Stage 3 writes it. The 3-agent design produces **no**
@@ -135,19 +154,61 @@ originally specced as "Agent 2"; the implementation simplified to pure templatin
 **Stage 3 — author and lower the spec.** The heart of the pipeline:
 
 1. [Agent 3](agents.md#agent-3) authors a `FormalSpec` (JSON(TLA)) from the summary.
+   For sequential arithmetic functions its prompt steers it to author an *abstract*
+   spec statement (a transition with `spec_statement: true` plus a postcondition,
+   e.g. `product' = a * b`) rather than hand-writing the datapath.
 2. [Compiler 1](compilers.md#compiler-1) emits abstract TLA+; **TLC** optionally
    model-checks it (skipped if TLC is not installed). On a TLC error, Agent 3 revises
    and the compile→check loop repeats (≤ 3 attempts).
 3. The [Refinement Engine](refinement.md) lowers the spec to RTL-style, one rule at a
    time, in a single [catch-all pass](refinement.md#refinement-driver-the-catch-all-pass)
-   (all rules, base prompt). Each step is logged to `refinement_chain.json`.
+   (all eight rules: six Tier-1 plus the two verified-derivation rules below). Each
+   step is logged to `refinement_chain.json`; each `pick_rule` decision is appended
+   to `refinement_decisions.jsonl`.
 4. A one-shot Agent-3 [correctness critic](refinement.md#the-correctness-critic) gates
    the refined spec before codegen.
 5. [Compiler 2](compilers.md#compiler-2) emits Verilog-2001 to `output.v`.
 
-**Stage 4 — simulate.** The deterministic [cocotb runner](verification.md#the-runner)
-builds `output.v` with Icarus Verilog and runs the Stage-2 testbench, writing a
-structured pass/fail report to `04_evaluation.json`.
+**The verified-derivation path.** When the spec carries an abstract spec statement,
+the bridge keeps the target variables abstract and `LoopIntroduction` refines the
+statement into a concrete clocked loop **only after** the deterministic obligation
+kernel (`pipeline/refinement/obligations.py`) discharges the Morgan/Back iteration
+obligations against the real expression semantics — O1 `pre ⇒ inv[init]`, O2
+invariant preservation plus strict variant decrease, O3 `inv ∧ ¬guard ⇒ post`. The
+kernel is honest about proof strength: `mode="exhaustive-proof"` when the input space
+is ≤ 65536 valuations (a real finite proof over the declared widths), else
+`mode="sampled"` (falsification only); a failure yields a concrete counterexample,
+and failed obligations make `apply()` a pure no-op — the engine's strike/backtrack
+signal. The discharged audit (invariant, variant, guard, mode, cases_checked,
+obligations) is recorded on the chain as a certificate. `ScheduleHandshakeFSM`
+(deterministic, no proof — the soundness lives in LoopIntroduction) then schedules
+the verified loop onto a hardened IDLE/BUSY/DONE start/done FSMD: a
+back-to-back-safe load (start accepted in IDLE *or* DONE), body conditionals
+flattened into flat else-if chains, combinational `done`. This path is what makes
+the intro's "one provably-correct refinement rule at a time" literally true for
+derivations.
+
+**Stage 4 — simulate.** Deterministic, in two phases around the simulation.
+**Pre-flight:** the spec-derived golden-vector cross-check
+(`pipeline/cocotb/vector_check.py`) replays `refinement_chain.json` to reconstruct
+the refined spec, re-derives the expected outputs from Agent 1's *input* stimulus via
+an independent spec interpreter (`pipeline/cocotb/spec_sim.py`), and writes a
+corrected bench (`02_testbench_specvec.py`) plus a disagreement report
+(`02_vector_check.json`) — so a correct RTL is never failed by a wrong Agent-1 vector
+(no false reds), and any Agent-1/spec disagreement is surfaced on
+`04_evaluation.json` and the `main.py` banner instead of silently shipping green. The
+[cocotb runner](verification.md#the-runner) then builds `output.v` with Icarus
+Verilog and runs the spec-derived bench (the Stage-2 bench is the fail-soft
+fallback), writing a structured pass/fail report to `04_evaluation.json`.
+**Post-pass:** on a pass, the mass spec-vs-RTL soak (`pipeline/cocotb/soak.py`)
+cross-checks the RTL against the refined spec over `RTL_SOAK_CYCLES` deterministic
+random cycles (default 2000, `0` disables) — in-width stimulus, reset never re-driven
+in-vector, seed = crc32 of the run-dir name so the soak replays from the artifacts
+alone. A soak divergence is a deterministic codegen/composition bug: surfaced loudly
+(`04_soak.json`, a `soak` block on `04_evaluation.json`, the `main.py` banner) but it
+never flips `status`, because a metered Agent-3 revision cannot fix codegen
+(diagnoser routing for soak divergences is planned). Both phases are fail-soft —
+they skip rather than break a Stage-4 run.
 
 **Diagnose — route the fix.** On a Stage-4 failure, the
 [Diagnoser](agents.md#the-diagnoser) classifies the fault as a **spec** fault (wrong
@@ -166,8 +227,10 @@ classified `spec` with **no** LLM call.
 | Diagnoser | ✓ | OpenAI-compatible proxy | `pipeline/agents/agent_diagnoser.py` |
 | Stage 2 generator | ✗ | — | `pipeline/cocotb/generator.py` |
 | Compiler 1 / Compiler 2 | ✗ | — | `pipeline/compilers/` |
-| Refinement Engine + rules | ✗ | — | `pipeline/refinement/` |
+| Refinement Engine + rules + obligation kernel | ✗ | — | `pipeline/refinement/` |
 | cocotb runner | ✗ | — | `pipeline/cocotb/runner.py` |
+| Spec simulator + vector check + soak | ✗ | — | `pipeline/cocotb/{spec_sim,vector_check,soak}.py` |
+| Native core (optional C++17 exact mirror) | ✗ | — | `core/` → `pipeline.refinement._rtlcore` |
 | LangGraph orchestration | ✗ | — | `pipeline/graph.py` |
 
 The two transports are a deliberate split — see [agents.md](agents.md#two-transports).
@@ -185,9 +248,14 @@ Everything above exists to protect four properties. Treat them as non-negotiable
    tool-using; the invariant applies to rule selection.)
 
 2. **Deterministic core.** The compilers, the refinement engine and its rules, the
-   cocotb generator, and the runner contain no LLM calls and no nondeterminism. Rule
-   `apply()` is pure, which is what makes the refinement chain replayable and
-   backtracking sound.
+   obligation kernel, the spec simulator, the cocotb generator, and the runner
+   contain no LLM calls and no nondeterminism. Rule `apply()` is pure, which is what
+   makes the refinement chain replayable and backtracking sound. The optional native
+   core preserves this: both backends return identical verdicts and rows by contract
+   (same enumeration order, same `mode`/`cases_checked`, byte-identical
+   counterexamples, the identical 65536 exhaustive threshold; dispatch via
+   `OBLIGATIONS_BACKEND` / `SPECSIM_BACKEND` or `backend=` params), so replay is
+   backend-independent.
 
 3. **Verilog-2001 only.** Compiler 2 emits a strict Verilog-2001 subset (no `logic`,
    `always_ff`, `always_comb`, or `initial` in synthesizable modules). This is
