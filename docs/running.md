@@ -6,10 +6,19 @@
 - For end-to-end simulation: `iverilog` + `vvp` (Icarus Verilog) and `cocotb` on PATH.
   `verilator` is optional (extra lint). TLC (the TLA+ model checker) is optional — Stage
   3 skips model checking if it is not installed.
+- *Optional* — the **native verification core** (`core/`): `cmake` ≥ 3.18, a C++17
+  compiler, and `pip install pybind11`. `./core/build.sh` configures, builds, runs the
+  C++ tests, and installs the `_rtlcore` module into `pipeline/refinement/`, where the
+  obligation kernel and spec simulator auto-detect it (~205–311× faster exhaustive
+  proofs, ~59× faster spec-sim). Everything works without it — both fall back to pure
+  Python automatically, with identical results. See [core/README.md](../core/README.md).
 
 ```bash
 pip install -r requirements.txt
 # macOS: brew install icarus-verilog
+
+# optional native core:
+pip install pybind11 && ./core/build.sh
 ```
 
 ## Credentials
@@ -34,16 +43,33 @@ not configured" error. The Anthropic key is billed per token and is **separate f
 Claude subscription** — a subscription does not cover direct API usage. See
 [agents.md](agents.md#two-transports) for why the transports are split.
 
+Three optional runtime knobs (no credentials involved):
+
+| Variable | Effect |
+|---|---|
+| `OBLIGATIONS_BACKEND` | obligation-kernel backend: `auto` (default — native core iff built), `python`, or `cpp` (errors if not built) |
+| `SPECSIM_BACKEND` | the same three choices for the spec-simulator cycle engine |
+| `RTL_SOAK_CYCLES` | length of Stage 4's post-pass spec-vs-RTL soak (default `2000`; `0` disables) |
+
+The backend knobs select an *implementation*, never a verdict — both backends produce
+identical results, so artifacts and chain replay do not depend on which one ran.
+
 ## Run
 
 ```bash
 python3.11 main.py                  # default: a synchronous 2-bit up-counter
 python3.11 main.py "Design a synchronous D flip-flop with active-high reset."
+python3.11 main.py --clean-artifacts [N]   # prune all but the N newest runs (default 10)
 ```
 
 `main.py` creates a fresh `run_id`, writes your prompt to
 `artifacts/<run_id>/00_nl_spec.json`, invokes the LangGraph pipeline, and reports the
 terminal result. Every intermediate artifact is left on disk for inspection.
+
+Run directories are date-prefixed and human-readable —
+`artifacts/<YYYY-MM-DD>/<HHMMSS>-<module>-<hash>/` (the module name is spliced into the
+leaf once the run completes) — and `artifacts/latest` is a symlink refreshed to point at
+the newest run. `--clean-artifacts` keeps the tree from growing without bound.
 
 ## Output artifacts
 
@@ -57,10 +83,16 @@ Everything lands under `artifacts/<run_id>/`:
 | `02_formal_spec.json` | 3 | the formal spec (JSON(TLA)) |
 | `03_rtl_output.json` + `output.v` | 3 | Verilog metadata + the generated module |
 | `refinement_chain.json` | 3 | the ordered rule-application trace |
+| `refinement_decisions.jsonl` | 3 | per-`pick_rule` decision log |
+| `02_vector_check.json` + `02_testbench_specvec.py` | 4 (pre-flight) | spec-derived golden vectors + Agent-1/spec disagreement report |
 | `04_evaluation.json` | 4 | cocotb pass/fail (structured) |
+| `04_soak.json` + `04_soak_testbench.py` | 4 (post-pass) | mass spec-vs-RTL soak over `RTL_SOAK_CYCLES` random cycles, seeded from the run-dir name |
 | `04_diagnosis.json` | diagnose | fault classification (only on a Stage-4 failure) |
 
-A run **succeeds** when `04_evaluation.json` has `"status": "success"`. See
+A run **succeeds** when `04_evaluation.json` has `"status": "success"`. A passing run
+can still print a loud banner: Agent-1 vector disagreements (`02_vector_check.json`)
+and soak divergences (`04_soak.json`) are recorded on `04_evaluation.json` and surfaced
+by `main.py`, but never flip the run status. See
 [architecture.md](architecture.md#2-the-artifact-chain) for the full contract and which
 stage reads/writes each file.
 

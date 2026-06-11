@@ -24,9 +24,10 @@ style, retry protocol), see [`CLAUDE.md`](../CLAUDE.md).
 |---|---|
 | [architecture.md](architecture.md) | Pipeline stages, the artifact chain, the LangGraph control plane, the runtime-agent / deterministic split, and the four design invariants. |
 | [agents.md](agents.md) | The three runtime LLM agents — Agent 1, Agent 3 (five call types, tool use, budget guard), and the Diagnoser — plus the two LLM transports. |
-| [refinement.md](refinement.md) | The refinement engine, the six Tier-1 rules, the multi-pass template schedule, the correctness critic, backtracking, and the replayable refinement chain. |
+| [refinement.md](refinement.md) | The refinement engine, the eight rules — six Tier-1 plus the verified-derivation pair (LoopIntroduction, gated by the obligation kernel, and ScheduleHandshakeFSM) — the multi-pass template schedule, the correctness critic, backtracking, and the replayable refinement chain. |
 | [compilers.md](compilers.md) | Compiler 1 (FormalSpec → TLA+), Compiler 2 (RTL-style TLA+ → Verilog-2001), the bridge between them, port/width inference, and the Verilog-2001 banlist. |
-| [verification.md](verification.md) | The deterministic cocotb testbench generator and runner, and the test suite (deterministic vs. live). |
+| [verification.md](verification.md) | The deterministic cocotb testbench generator and runner, the spec-derived golden-vector pre-flight (spec simulator + vector cross-check), the post-pass spec-vs-RTL soak, and the test suite (deterministic vs. live). |
+| [core/README.md](../core/README.md) | The optional native verification core (C++17 / CMake / pybind11): exact mirrors of the expression evaluator, obligation kernel, and spec-sim cycle loop — identical verdicts and rows to the pure-Python fallback, selected via `OBLIGATIONS_BACKEND` / `SPECSIM_BACKEND`. |
 | [background.md](background.md) | Why formal methods, the stepwise-refinement idea, the refinement-calculus rule tables, and references. |
 
 ## Conventions
