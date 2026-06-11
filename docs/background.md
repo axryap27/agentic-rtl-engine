@@ -28,10 +28,16 @@ naive move ("rewrite this abstract spec as RTL") is exactly the open-ended reque
 invites hallucination.
 
 Instead the engine uses **stepwise refinement**: it lowers the spec one transformation
-at a time, each a single rule from a small fixed library. Every rule is
-*refinement-preserving* by construction, so a design built only from library rules is
-correct by construction. The LLM's entire job per step is to pick the next rule from the
-set that currently applies — a small structured-output decision, not freehand code.
+at a time, each a single rule from a small fixed library. Every structural rule is
+*refinement-preserving* by construction; `LoopIntroduction` is refinement-preserving by
+**per-application mechanical proof** — its iteration-rule provisos are discharged by a
+deterministic obligation kernel against the real expression semantics before the loop
+is installed, and a failed discharge is a pure no-op (the engine's backtrack signal),
+so an unproven derivation can never enter the chain (see
+[refinement.md](refinement.md#the-obligation-kernel)). Either way, a design built only
+from library rules is correct by construction. The LLM's entire job per step is to pick
+the next rule from the set that currently applies — a small structured-output decision,
+not freehand code.
 Every applied rule is logged, giving a replayable proof trail from abstract spec to RTL.
 
 This is the **bounded action space**: constrain the LLM's choices to a menu of
@@ -49,9 +55,17 @@ during-condition, postcondition); `⊑` reads "is refined by". Each rule rewrite
 statement into a more concrete one under stated provisos, and the rewrite preserves the
 refinement relation.
 
-The two tables below are the source menu. The **six rules the pipeline implements
-today** (the Tier-1 set) are marked **✔**; the rest are Tier-2 / research-grade and
-are not implemented. When adding a rule with `/add-refinement-rule`, record it in the
+The two tables below are the source menu. The pipeline implements **eight rules
+today**: the six structural Tier-1 rules marked **✔** below, plus the
+verified-derivation pair — **LoopIntroduction**, which implements the Table-1
+*Iteration* lineage in full (Morgan's iteration rule / Back's do–od introduction,
+with the provisos `O1: pre ⇒ inv[init]`, `O2: inv ∧ guard ⇒ inv[body]` ∧ variant
+decreases, `O3: inv ∧ ¬guard ⇒ post` **mechanically discharged** per application by
+the [obligation kernel](refinement.md#the-obligation-kernel) before a loop is
+installed), and **ScheduleHandshakeFSM**, the deterministic FSMD scheduling of the
+verified loop (no proof of its own — soundness lives in LoopIntroduction). The
+remaining rows are Tier-2 / research-grade and are not implemented. When adding a
+rule with `/add-refinement-rule`, record it in the
 appropriate table here, and implement it per [refinement.md](refinement.md#adding-a-rule).
 
 ### Table 1 — process-level development
@@ -88,10 +102,13 @@ Shorthand `ss = w : [pre, dur, post]`.
 | Procedure Assignment / Specification | | factor a sub-specification into a procedure |
 | Feasibility | | the statement is implementable |
 
-The implemented six cover reset/init, clocked iteration, assignment, branching,
+The implemented eight cover reset/init, clocked iteration, assignment, branching,
 sequencing, and variable introduction — enough for counters, flip-flops, FSMs, muxes,
-and simple FSM+datapath designs. Their exact applicability conditions and parameters
-are in [refinement.md](refinement.md#the-six-tier-1-rules).
+and simple FSM+datapath designs — and, via the verified-derivation pair, refining an
+abstract arithmetic specification statement (e.g. `product' = a * b`) into an
+obligation-checked multi-cycle FSMD datapath behind a start/done handshake (the
+sequential-multiplier class). Their exact applicability conditions and parameters
+are in [refinement.md](refinement.md#the-rule-library).
 
 ---
 

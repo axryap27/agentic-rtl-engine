@@ -55,15 +55,25 @@ whole loop this way.
 3. at least one non-reset action exists;
 4. every variable has `abstract == False`;
 5. every variable has a non-empty `type`;
-6. every variable has a non-`None` `reset_value`;
+6. every variable has a non-`None` `reset_value` — **except** memory arrays (`depth`
+   set: synthesis-canonical memories carry no reset) and combinational wires
+   (`combinational: True`: driven by a continuous `assign`, never reset);
 7. every non-reset action has `clocked == True`;
 8. every non-reset action has non-empty `updates`.
 
+Conditions 7–8 have two structural carve-outs: a **pure identity hold** (every update
+is `v' = v`, per `bridge._is_identity_hold`) emits nothing distinct and need not be
+separately clocked, and a **combinational action** (`combinational: True`) is
+continuous logic — the bridge emits it as CombinationalLogic / `assign`, never
+clocked. Ordinary register variables and actions are still held to all eight.
+
 ---
 
-## The six Tier-1 rules
+## The rule library
 
-**File:** `pipeline/refinement/rules/` · `RULE_REGISTRY` registers these six, in order.
+**File:** `pipeline/refinement/rules/` · `RULE_REGISTRY` registers **eight** rules, in
+order: the six structural Tier-1 rules, then the verified-derivation pair
+(`LoopIntroduction`, `ScheduleHandshakeFSM` — [documented below](#verified-derivation-loopintroduction--schedulehandshakefsm)).
 Every rule subclasses `RefinementRule` (`base.py`) and implements exactly three
 methods:
 
@@ -80,12 +90,19 @@ chain from scratch.
 
 | Rule | Fires when… | Key params | Hardware meaning |
 |---|---|---|---|
-| **Initialization** | a variable lacks a `reset_value`, or no `reset_action` is set | `reset_values: {var → expr}`, `reset_action_name="Reset"` | synchronous reset: every register gets a known start value |
-| **Iteration** | a non-reset action has `clocked == False` | `action_name` | clock the action — its body becomes a per-cycle register update |
-| **SequentialComposition** | a non-reset action has neither `sequential_steps` nor `branches` | `action_name`, `steps: [{name, guard, updates}]` | ordered combinational steps within one cycle |
+| **Initialization** | a non-memory, non-combinational variable lacks a `reset_value`, or no `reset_action` is set | `reset_values: {var → expr}`, `reset_action_name="Reset"` | synchronous reset: every register gets a known start value |
+| **Iteration** | a non-reset, non-combinational action has `clocked == False` | `action_name` | clock the action — its body becomes a per-cycle register update |
+| **SequentialComposition** | a non-reset, non-combinational action has neither `sequential_steps` nor `branches` | `action_name`, `steps: [{name, guard, updates}]` | ordered combinational steps within one cycle |
 | **Assignment** | a non-reset action has empty `updates` | `action_name`, `updates: [{variable, expression}]` | concrete register write(s) |
-| **Alternation** | a non-reset action has no `branches` | `action_name`, `branches: [{guard, updates}]` | mutually-exclusive guarded branches (if / case / mux) |
+| **Alternation** | a non-reset, non-combinational action has no `branches` | `action_name`, `branches: [{guard, updates}]` | mutually-exclusive guarded branches (if / case / mux) |
 | **IntroduceVariable** | always (engine checks name uniqueness) | `name`, `type`, `abstract=True`, `reset_value=None`, `width=1` | add a new register or wire |
+| **LoopIntroduction** | a non-reset, non-combinational action carries `spec_statement: true` and a target variable is still abstract | ten required — [see below](#loopintroduction) | refine an abstract spec statement into an obligation-checked clocked loop |
+| **ScheduleHandshakeFSM** | a non-reset action carries LoopIntroduction's `loop` marker (and no `state` register yet) | `action_name`; optional `state_var` / `done_var` / `start` | schedule the verified loop behind an IDLE/BUSY/DONE start/done handshake FSMD |
+
+The combinational exclusions exist because a `combinational: True` action is
+continuous logic (an `assign`) — never clocked, decomposed, or branched — and
+memory-array / combinational-wire variables are never reset (the same carve-outs
+`is_rtl_style` honours above).
 
 The spec dict the rules operate on has this shape (see `base.py` and
 [compilers.md](compilers.md#the-bridge) for the bridge that builds it from a
@@ -93,18 +110,136 @@ The spec dict the rules operate on has this shape (see `base.py` and
 
 ```jsonc
 {
-  "variables": [{"name", "type", "abstract", "reset_value", "clocked", "width"}],
+  "variables": [{"name", "type", "abstract", "reset_value", "clocked", "width",
+                 "depth",            // memory array (register file / RAM) — never reset
+                 "combinational"}],  // born-concrete wire driven by an `assign`
   "actions":   [{"name", "guard", "updates": [{"variable","expression"}],
-                 "clocked", "is_rtl_style", "branches": [...], "sequential_steps": [...]}],
+                 "clocked", "is_rtl_style", "branches": [...], "sequential_steps": [...],
+                 "combinational",                      // continuous logic, never clocked
+                 "spec_statement", "postcondition",    // abstract Morgan spec statement
+                 "refinement": {...}, "loop": {...}}], // post-LoopIntroduction markers
   "init": "...", "invariants": ["..."],
   "reset_action": "Reset" | null, "abstraction_mapping": {...}, "properties": [...]
 }
 ```
 
+The bridge sets `spec_statement: true` + `postcondition` from the matching
+`FormalSpec` `Transition` fields and births the targeted variables **abstract** —
+that is what arms `LoopIntroduction`. The `refinement` (obligation audit) and `loop`
+(scheduling marker) fields appear only after a successful `LoopIntroduction`.
+
 `Alternation` and `SequentialComposition` stash their structured `branches` /
 `sequential_steps` on the action; the bridge composes them into one correct
 next-state expression per variable (a nested ternary), so multi-branch logic is not
 collapsed first-wins.
+
+---
+
+## Verified derivation: LoopIntroduction + ScheduleHandshakeFSM
+
+The verified-derivation pair implements a **proved** abstract→concrete step: an
+abstract Morgan specification statement (e.g. a multiplier's `product' = a * b`) is
+refined into a concrete multi-cycle datapath only after the iteration-rule proof
+obligations are mechanically discharged. This is the chain behind the FSMD
+multiplier design class (first live verified derivation: run 102611 — chain
+`LoopIntroduction → ScheduleHandshakeFSM → Initialization`, 3 picks, 0 strikes).
+Both rules are pinned by `tests/test_verified_derivation.py`.
+
+### LoopIntroduction
+
+**File:** `rules/loop_introduction.py` — Morgan's iteration rule / Back's do–od
+introduction (the Table-1 *Iteration* lineage in
+[background.md](background.md#table-1--process-level-development), provisos included).
+
+**Fires when** a non-reset, non-combinational action carries `spec_statement: true`
+and at least one of the variables its `updates` name is still abstract (the bridge
+arms this, as described above). Distinct from `Iteration`, which merely sets
+`clocked = True` on an already-concrete action — LoopIntroduction *derives* the
+concrete clocked body from an abstract postcondition, verified. Do not merge them.
+
+**Params — all ten required** (`ValueError` on missing/malformed, which the engine
+excludes): `action_name`, `postcondition`, `invariant`, `variant`, `guard`,
+`init` (`{loop_var: expr}` load values), `body` (`{loop_var: expr}`, one
+simultaneous read-before-write step), `mapping` (`{abstract_var: concrete_expr}`
+data refinement at loop exit), `fresh_vars` (`[{name, width, type?, reset_value?}]`
+new loop registers), `input_widths` (`{input: bit_width}` — the obligation domain).
+
+**Obligation-gated apply.** `apply()` first calls `discharge_loop_obligations` (the
+kernel below). On a **failed** discharge it returns an unchanged deepcopy of the
+spec — a pure **no-op**, which trips the engine's no-op guard (see
+[Backtracking](#backtracking)): the exact `(rule, params)` is excluded at that depth
+and a strike is counted, so an unproven derivation can never enter the chain. On
+**success** it installs the verified loop body as the action's guarded, clocked
+updates, marks the mapping/body variables concrete, merges `mapping` into the spec's
+`abstraction_mapping`, records the discharged audit on `action["refinement"]` —
+`{invariant, variant, guard, mode, cases_checked, obligations}`, the chain-visible
+certificate — and writes the scheduling marker `action["loop"] = {init, body,
+variant, guard}` for ScheduleHandshakeFSM (`init`, the per-register load values, is
+recorded nowhere else).
+
+### ScheduleHandshakeFSM
+
+**File:** `rules/schedule_handshake_fsm.py` — a **deterministic** scheduling
+transform: no proof, no LLM. Soundness already lives in LoopIntroduction's
+obligation gate; this rule only schedules the verified bare loop onto a control FSM.
+
+**Fires when** a non-reset action carries the `loop` marker (and the default
+`state` register is not yet declared — a defensive already-scheduled check). The
+marker is **cleared** on schedule, so the rule is inert afterwards. Params:
+`action_name` required; `state_var` (default `"state"`), `done_var` (default
+`"done"`), `start` (default `"start"`) optional.
+
+What it emits — the hardened IDLE(0)/BUSY(1)/DONE(2) start/done FSMD:
+
+- **Load** fires on `((state = 0) OR (state = 2)) AND start = 1`. Accepting `start`
+  in the 1-cycle DONE state is what makes back-to-back operation work — an
+  IDLE-only load drops a start pulse that lands in DONE (the exact live-run bug
+  this hardening fixed).
+- Each loop register gets a load-on-start / step-in-BUSY / hold else-if chain.
+- The body's own conditionals are **flattened** into that flat else-if chain, with
+  the BUSY condition (`state = 1`) ANDed into each body-branch guard — Compiler 2's
+  depth-0 IF-splitter recurses only into ELSE, so a nested IF left in a THEN
+  position leaks untranslated into the Verilog.
+- A combinational `done = (state = 2)` is appended as a `DoneFlag` action driving a
+  born-concrete wire (`combinational: true`), and the 2-bit `state` register
+  (reset `0`) is introduced.
+
+### The obligation kernel
+
+**File:** `pipeline/refinement/obligations.py` —
+`discharge_loop_obligations(...) -> ObligationResult`
+
+The kernel discharges the three Morgan/Back iteration obligations against the **real
+expression semantics**: the evaluator is `pipeline.cocotb.spec_sim._eval` (bound
+lazily to avoid an import cycle) — the exact grammar Compiler 2 emits, so a
+derivation that discharges here is checked against the arithmetic the generated
+Verilog will run.
+
+| | Obligation | Checked as |
+|---|---|---|
+| **O1** | `pre ⇒ inv[init]` | the invariant holds after `init`, for every input |
+| **O2** | `inv ∧ guard ⇒ inv[body]` ∧ variant decreases | the body preserves the invariant and the variant strictly decreases (termination, capped at `max_iters`) — walked over the **reachable** loop states per input, a documented limitation: not a symbolic proof over all invariant-satisfying states |
+| **O3** | `inv ∧ ¬guard ⇒ post` | run to loop exit, bind the abstract variables via the data-refinement `mapping`, assert the postcondition |
+
+The `mode` field is honest about proof strength: `"exhaustive-proof"` iff the
+product of the input ranges is ≤ 65536 (the default `exhaustive_threshold`) — every
+fixed-width input valuation is checked, a genuine finite proof over the declared
+widths — else `"sampled"` (edge values plus a deterministic pseudo-random battery;
+falsification only, never a proof). A failed obligation returns a concrete
+counterexample `{obligation, inputs, state, detail}`; `ObligationResult` carries
+`ok` / `mode` / `cases_checked` / `obligations` / `counterexample`.
+
+**Native backend.** `discharge_loop_obligations(backend="auto" | "python" | "cpp")`
+selects the implementation, never the verdict: under `"auto"` the
+`OBLIGATIONS_BACKEND` env var may force a choice, else the optional compiled kernel
+(`core/build.sh` → `pipeline.refinement._rtlcore`, C++17/pybind11) is used iff
+built; `kernel_backend()` reports what `"auto"` resolves to, and pure Python is the
+fallback. The native kernel is an **exact-verdict mirror** of the Python reference —
+same enumeration order, same `mode`/`cases_checked`, byte-identical counterexamples,
+pinned by `tests/test_native_kernel.py` — so chain replay is backend-independent. It
+exists purely for speed: a 6-bit exhaustive proof drops 1.38 s → 6.8 ms (~205×) and
+the full 8-bit 65,536-case proof 23.2 s → 74 ms (~311×), and these sweeps run on
+**every** LoopIntroduction proposal, including failed ones during backtracking.
 
 ---
 
@@ -174,6 +309,12 @@ unverified RTL never reaches the testbench.
 initial abstract spec — the chain is the proof trace, and replay is exact because every
 rule is pure.
 
+Alongside it, Stage 3 appends every `pick_rule` decision to
+`refinement_decisions.jsonl` (`pipeline/nodes/stage3.py`): the chain records only
+*committed* applies, while the decision log also captures what was offered and what
+Agent 3 chose on calls the engine later rejected — so one metered live run leaves a
+complete, offline-debuggable trace.
+
 ---
 
 ## Backtracking
@@ -185,7 +326,15 @@ When a pick is invalid or a depth dead-ends, the engine backtracks:
   integer, not a set keyed on error text, so a picker that fails *identically* every
   call — the common LLM stall — still trips the threshold instead of spinning to
   `MAX_STEPS`.) Re-picking an already-excluded choice also counts as a strike, so a
-  pure-of-spec picker cannot loop forever.
+  pure-of-spec picker cannot loop forever. A `pick_rule` that **throws** (unparseable
+  LLM return, transport error, truncation) is counted as a strike under the same
+  policy — one bad Agent-3 response never aborts the run.
+- **No-op applications** are treated like invalid picks: when a step's `post_hash`
+  equals its `pre_hash`, the exact `(rule, params)` is excluded at that depth and a
+  strike is counted (backtrack after 3). This is the contract by which a failed
+  [LoopIntroduction obligation discharge](#loopintroduction) — a pure no-op by
+  design — surfaces to the engine, and it also stops a picker from spinning on an
+  already-satisfied rule (e.g. Iteration on an already-clocked action).
 - **`_backtrack`** pops the last committed step, records the popped `(rule, params)` as
   excluded at that depth, and replays the truncated chain to roll the spec back. If a
   depth's applicable rules are all excluded it rolls back further, up to
