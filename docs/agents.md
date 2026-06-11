@@ -80,8 +80,43 @@ would have to parse. The engine validates the choice is in the applicable set, a
 the rule deterministically, and appends to the chain. Giving `pick_rule` tools or a
 loop would break this invariant and must be flagged for re-decision.
 
+The [derivation proposal](#abstract-spec-authoring-and-the-verified-derivation) rides
+*inside* this contract, not around it: when `LoopIntroduction` is offered, the `params`
+dict carries the proposed invariant/variant/body — the params got richer, but it is
+still the same single one-shot structured-output call with no tools and no internal
+loop (the `tools` argument is omitted from the API call entirely; see the comment in
+`pick_rule`). The bounded action space is unchanged.
+
 `critique_refinement` (the [correctness critic](refinement.md#the-correctness-critic))
 is likewise one-shot, no tools.
+
+### Abstract-spec authoring and the verified derivation
+
+For a pure arithmetic/algorithmic function that needs a sequential multi-cycle
+implementation (a sequential multiplier, a divider, a serial CRC), Agent 3's system
+prompt instructs it to **prefer authoring an abstract spec statement** over
+hand-writing the shift-add chains: a single transition with
+`"spec_statement": true`, `"condition": "TRUE"`, an abstract update (e.g.
+`{"product": "a * b"}`), and a top-level `postcondition` stating the relation the
+implementation must establish — both real `FormalSpec` schema fields
+(`pipeline/schemas/tla_schema.py`). The target output variable is declared but left
+**abstract** (the refinement engine derives and *verifies* the concrete loop);
+operands and `start` stay free inputs; reset and the handshake (`state`/`done`) are
+introduced by the refinement rules, never authored. The concrete hand-written FSMD
+recipe remains valid for directly-authorable designs.
+
+`pick_rule` carries the matching **derivation-proposal** guidance: when refining an
+abstract spec statement and `LoopIntroduction` is in the applicable set, it picks it
+and proposes the full derivation as params — `action_name`, `postcondition`,
+`invariant`, `variant`, `guard`, `init`, `body`, `mapping`, `fresh_vars`,
+`input_widths` (e.g. the textbook shift-add invariant
+`product + mplier * mcand = a * b`). The engine's
+[obligation kernel](refinement.md) auto-checks the proposal against the real
+semantics and rejects a wrong invariant or body — `LoopIntroduction.apply()` is a
+pure no-op on failed obligations, which the engine counts as a strike (backtrack
+after 3). After success the next applicable set offers `ScheduleHandshakeFSM`
+(params `{"action_name": <the loop action>}`), then `Initialization`, so the full
+verified chain is `LoopIntroduction → ScheduleHandshakeFSM → Initialization`.
 
 ### Temperature auto-detection
 
