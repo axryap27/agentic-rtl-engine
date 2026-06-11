@@ -39,14 +39,38 @@ there are several (the `.cfg` lists each as an `INVARIANT`). If `FormalSpec.raw_
 set, Compiler 1 emits it verbatim and only generates the `.cfg` from the structured
 fields — an escape hatch for hand-written TLA+.
 
+An update **key** may name a single memory-array element (`mem[waddr]` — a
+register-file write). Compiler 1 renders it via the TLA+ function-update form
+`mem' = [mem EXCEPT ![waddr] = expr]` (`mem[i]' = e` is not legal TLA+), uses the
+**base** array name when building each action's `UNCHANGED` tuple (so the array never
+lands in `UNCHANGED` alongside its own EXCEPT update — a contradiction), and skips the
+scalar range constraint for a memory (`depth` set): `mem \in 0..255` would be wrong
+for a function-valued variable, so element widths are enforced in the generated RTL
+instead.
+
 The `FormalSpec` schema (`pipeline/schemas/tla_schema.py`):
 
 ```python
 class Variable(BaseModel):    type: str          # "Nat" | "Bit"
                               width: int          # bit width → range constraint
+                              depth: Optional[int] = None  # set → MEMORY ARRAY of depth
+                                                  # words (register file / RAM): emitted
+                                                  # reg [w-1:0] name [0:depth-1], never a
+                                                  # port, never reset
 class Transition(BaseModel):  label: str          # action name (matches TLA+ label)
                               condition: str       # AND/OR/NOT enabling condition
-                              updates: dict[str, str]   # var → next-value expression
+                              updates: dict[str, str]   # var → next-value expression; a
+                                                  # KEY may be an indexed memory-element
+                                                  # write ("mem[waddr]")
+                              combinational: bool = False  # True → continuous (assign)
+                                                  # logic: wire targets, never clocked,
+                                                  # never reset
+                              spec_statement: bool = False # True → abstract Morgan spec
+                                                  # statement; targets born abstract so
+                                                  # LoopIntroduction fires
+                              postcondition: Optional[str] = None  # the abstract post the
+                                                  # derived loop must establish (used with
+                                                  # spec_statement=True)
 class FormalSpec(BaseModel):  module_name: str
                               description: str
                               variables: dict[str, Variable]
