@@ -3,7 +3,7 @@
 A snapshot of the current state. The per-run history and resolved-bug detail live in the
 git log and in the tests that pin each fix — this file is **not** the archive.
 
-_Last updated: 2026-06-09._
+_Last updated: 2026-06-10._
 
 ---
 
@@ -14,7 +14,7 @@ _Last updated: 2026-06-09._
 | Stage 1 — prompt → `SpecSummary` (Agent 1) | built |
 | Stage 2 — testbench generation (deterministic) | built |
 | Stage 3 — spec authoring, refinement, codegen (Agent 3 + engine + Compiler 2) | built |
-| Stage 4 — cocotb simulation | built; **spec-derived golden-vector cross-check** (removes Agent-1 false reds; flags Agent-1/spec disagreements) |
+| Stage 4 — cocotb simulation | built; **spec-derived golden-vector cross-check** (removes Agent-1 false reds; flags Agent-1/spec disagreements) + **mass spec-vs-RTL soak** (2,000 deterministic random cycles post-pass; replayable seed; loud on divergence) |
 | Diagnoser — failure classification + routing | built |
 | Refinement engine + eight rules (six Tier-1 + `LoopIntroduction` + `ScheduleHandshakeFSM`) | built; catch-all is the sole, replayable driver; robust to a throwing/cycling live picker; **verified derivation**: abstract spec statement → obligation-checked loop → scheduled FSMD |
 | Obligation kernel (`pipeline/refinement/obligations.py`) | built; discharges Morgan/Back O1/O2/O3 against the real expression semantics; honest `mode` (exhaustive-proof vs sampled) |
@@ -22,7 +22,7 @@ _Last updated: 2026-06-09._
 | Compiler 1 / Compiler 2 + bridge | built; Verilog-2001, width-correct, banlist-enforced; **memory arrays** + **combinational outputs** + **FSM control / multi-cycle datapath** |
 | LangGraph orchestration + status routing | built |
 | Usage ledger + Agent-3 budget guard | built |
-| Deterministic test suite | **457 passed, 0 xfailed** (+22 opt-in live-LLM tests, deselected by default) |
+| Deterministic test suite | **469 passed, 0 xfailed** (+22 opt-in live-LLM tests, deselected by default) |
 
 The deterministic spine runs **NL → RTL → cocotb PASS offline** on every design class below,
 with all LLM boundaries mocked, exercising the real engine, both compilers, and cocotb.
@@ -43,7 +43,7 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
 | 8-bit accumulator | ✅ `121027-760bd3` | clean after a 3-run arc (RC4–RC8); active-low `rst_n` confirmed live |
 | 8×8 register file | ✅ `155212-38cc17` | first **memory array**; clean on the first try |
 | 4-deep FIFO | ✅ `190407` | first **combinational output**; clean live cocotb PASS via the spec-derived bench. The cross-check caught **two** Agent-1 false reds (v10 `empty`, v19 `rd_data`) and surfaced them — no false green. (`181016` was the codegen-validated false-red run that motivated the cross-check.) |
-| 8×8 sequential multiplier | ✅ `195118` (+fix) | first **FSMD** — control FSM (IDLE/BUSY/DONE) sequencing a multi-cycle shift-add datapath behind a start/done handshake. Reuses ONLY Init + Iteration (no new rule); shifts via `*2`/`/2`/`%2`. Live run proved the multiplier correct across the full 16-bit range **and** the cross-check exposed a handshake bug — a `start` landing in the 1-cycle DONE was dropped (the 3rd multiply never ran). **Fixed:** the load accepts `start` in IDLE *or* DONE (true back-to-back), with a regression test. Hardened design offline-proven; a confirming re-run is optional. |
+| 8×8 sequential multiplier | ✅ `195118` (+fix), ✅ `102611` **derived** | first **FSMD** — control FSM (IDLE/BUSY/DONE) sequencing a multi-cycle shift-add datapath behind a start/done handshake; shifts via `*2`/`/2`/`%2`. `195118` proved the multiplier correct across the full 16-bit range **and** the cross-check exposed a handshake bug (a `start` landing in the 1-cycle DONE was dropped); **fixed** — the load accepts `start` in IDLE *or* DONE. The `102611` re-run (same prompt) is the **first live verified derivation**: Agent 3 authored only the abstract `product' = a*b` spec statement (1 transition, 1 variable); the engine derived the shift-add loop after the kernel discharged O1/O2/O3 as an **exhaustive proof over all 65,536 inputs** (native backend, live), scheduled it onto the hardened handshake FSMD, and cocotb passed — 3 picks, 0 strikes. 19 vector disagreements, all benign: Agent 1 asserted `product=0` during BUSY where the spec shows the (correct) accumulating partials; both sides agree at every DONE and on done everywhere. |
 
 ---
 
@@ -65,7 +65,7 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
   combinational fixpoint, memory X-until-written, unsigned 32-bit arithmetic). `vector_check.py`
   derives correct expecteds from Agent 1's **input stimulus**; Stage 4 runs cocotb against them
   (no false red) and records Agent-1/spec disagreements in `02_vector_check.json`. It reproduces
-  all five offline traces exactly. **Guardrail:** because cocotb now checks RTL against a
+  all seven fixture traces exactly (including both multiplier forms). **Guardrail:** because cocotb now checks RTL against a
   spec-derived reference, a disagreement is recorded on `04_evaluation.json` and surfaced by
   `main.py` ("PASSED WITH UNRESOLVED AGENT-1/SPEC DISAGREEMENT") — a passing run is never a
   *silent* green when Agent 1 and the spec differ.
@@ -83,7 +83,10 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
   start/done FSMD (body conditionals FLATTENED into the else-if chains). The discharged
   obligations are recorded on the chain (`action["refinement"]`) as the derivation certificate.
   E2E: abstract multiplier → exhaustive proof (4,096 cases) → derived RTL → real cocotb PASS;
-  a wrong invariant stalls the chain (`tests/test_verified_derivation.py`).
+  a wrong invariant stalls the chain (`tests/test_verified_derivation.py`). **CONFIRMED LIVE**
+  (`102611`): live Agent 3 authored the abstract spec statement and proposed the correct
+  invariant first try; the kernel proved it exhaustively over all 65,536 inputs (native, in-loop)
+  and the derived FSMD passed cocotb.
 - **Native verification core** (`core/`, optional) — the obligation kernel runs on every
   `LoopIntroduction` proposal (including failed ones while backtracking), and the pure-Python
   evaluator re-parses each expression per call. The C++ core compiles expressions once and
@@ -97,8 +100,18 @@ the spec-derived cross-check) and fixed a handshake bug — see its row:
   memory writes, width masks) at ~0.8M edges/s — exact-ROW mirror (`derive_expected(backend=)`,
   `SPECSIM_BACKEND`), pinned by every fixture trace + a randomized-stimulus differential fuzz
   (`tests/test_native_specsim.py`). Today's ~20-vector Stage-4 derivation was never slow; this
-  is what makes a future MASS spec-vs-RTL cross-check (thousands of random cycles per run)
-  affordable.
+  is what makes the MASS spec-vs-RTL soak (below) affordable.
+- **Mass spec-vs-RTL soak** — after the directed bench passes, Stage 4 soaks the RTL against
+  the refined spec on `RTL_SOAK_CYCLES` (default 2,000) DETERMINISTIC random cycles
+  (seed = crc32 of the run dir — replayable from artifacts alone): in-width stimulus on every
+  free input, spec-derived expecteds, same cocotb lane (`pipeline/cocotb/soak.py`,
+  `04_soak.json`). A divergence here is a genuine codegen/composition bug the ~20 directed
+  vectors missed; it is surfaced loudly (artifact + main.py banner) but does NOT flip status —
+  a deterministic pipeline bug is not fixable by a metered Agent-3 revision retry (diagnoser
+  routing is the planned upgrade). Fail-soft: a skipped soak never breaks Stage 4. Non-vacuity
+  pinned by an injected off-by-one the directed vectors cannot see (`tests/test_soak.py`); the
+  live-derived multiplier (`102611`) passed a 2,000-cycle soak clean. The suite disables the
+  soak globally (tests/conftest.py) so e2e tests stay fast.
 
 ---
 

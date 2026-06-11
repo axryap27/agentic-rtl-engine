@@ -102,9 +102,9 @@ core/
 
 ## Roadmap
 
-- **Mass stimulus cross-check** — the native cycle engine makes a
-  thousands-of-cycles random soak (spec vs RTL) affordable per run
-  (~0.8M edges/s); the Stage-4 consumer for it is not wired yet.
+- ~~Mass stimulus cross-check~~ — WIRED: `pipeline/cocotb/soak.py` + Stage 4
+  soak every passing run on `RTL_SOAK_CYCLES` (default 2000) deterministic
+  random cycles, spec vs RTL, surfaced on `04_evaluation.json`/`04_soak.json`.
 - **Z3 symbolic mode** — the same compiled AST translated to Z3 bit-vector
   terms, upgrading `mode` from "exhaustive over the declared widths" to a
   width-generic symbolic proof (and making O2 the full Hoare obligation over
