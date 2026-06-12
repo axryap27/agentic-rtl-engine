@@ -229,6 +229,8 @@ Tests that hit the real models live separately (22 opt-in tests under `agentic_t
 
 The pipeline runs live end to end on all seven design classes. The headline result is the live verified derivation: Agent 3 proposes the abstract spec and the loop invariant, the obligation kernel proves the derived shift-add loop over every one of the 65,536 input pairs before installing it, the scheduler lowers it onto a start/done handshake FSM — and the result passes cocotb and a clean random soak. The bounded action space holds at its hardest test yet: the LLM proposes, the kernel proves.
 
+The artifacts from run `102611` are committed verbatim as an inspectable exhibit — **[`docs/exhibits/102611/`](docs/exhibits/102611/README.md)** — including the hand-authored abstract spec (`02_formal_spec.json`) and the derivation certificate (`refinement_chain.json`) with its discharged invariant and variant. The same mechanism is reproducible offline with no credentials via `pytest tests/test_verified_derivation.py`.
+
 ---
 
 Deeper design docs live in [`docs/`](docs/README.md) — start with [`docs/architecture.md`](docs/architecture.md) (full system) and [`docs/refinement.md`](docs/refinement.md) (the engine and rules). `CLAUDE.md` is the contributor contract.

@@ -1,0 +1,462 @@
+{
+  "module_name": "shift_add_multiplier",
+  "description": "Synchronous 8-bit by 8-bit sequential shift-and-add multiplier using an iterative algorithm over 8 clock cycles. A control FSM with IDLE, BUSY, and DONE states manages the operation. On start, operands are loaded and the multiplier iterates 8 times, conditionally adding the shifted multiplicand into the accumulator based on the low bit of the multiplier register. The 16-bit product is presented in the DONE state, where the combinational done flag is asserted. Reset is synchronous and active-high.",
+  "ports": [
+    {
+      "name": "clk",
+      "direction": "input",
+      "width": 1
+    },
+    {
+      "name": "reset",
+      "direction": "input",
+      "width": 1
+    },
+    {
+      "name": "start",
+      "direction": "input",
+      "width": 1
+    },
+    {
+      "name": "a",
+      "direction": "input",
+      "width": 8
+    },
+    {
+      "name": "b",
+      "direction": "input",
+      "width": 8
+    },
+    {
+      "name": "product",
+      "direction": "output",
+      "width": 16
+    },
+    {
+      "name": "done",
+      "direction": "output",
+      "width": 1
+    }
+  ],
+  "test_vectors": [
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 1,
+        "start": 0,
+        "a": 0,
+        "b": 0
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 1,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 12,
+        "done": 1
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 3,
+        "b": 4
+      },
+      "expected": {
+        "product": 12,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 1,
+        "start": 0,
+        "a": 0,
+        "b": 0
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 1,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 49,
+        "done": 1
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 7,
+        "b": 7
+      },
+      "expected": {
+        "product": 49,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 1,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 0,
+        "done": 0
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 65025,
+        "done": 1
+      }
+    },
+    {
+      "inputs": {
+        "clk": 1,
+        "reset": 0,
+        "start": 0,
+        "a": 255,
+        "b": 255
+      },
+      "expected": {
+        "product": 65025,
+        "done": 0
+      }
+    }
+  ],
+  "reset_port": "reset",
+  "reset_active_low": false,
+  "status": "success"
+}

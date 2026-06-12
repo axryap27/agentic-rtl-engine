@@ -1,0 +1,31 @@
+{
+  "module_name": "shift_add_multiplier",
+  "description": "Synchronous 8-bit by 8-bit sequential shift-and-add multiplier. Abstract spec: product = a * b, derived into a shift-add datapath over 8 clock cycles via a control FSM with IDLE, BUSY, DONE states. Reset is synchronous and active-high.",
+  "variables": {
+    "product": {
+      "type": "Nat",
+      "width": 16,
+      "depth": null
+    }
+  },
+  "initial": {
+    "product": "0"
+  },
+  "transitions": [
+    {
+      "label": "Compute",
+      "condition": "TRUE",
+      "updates": {
+        "product": "a * b"
+      },
+      "combinational": false,
+      "spec_statement": true,
+      "postcondition": "product = a * b"
+    }
+  ],
+  "invariants": [
+    "product <= 65025"
+  ],
+  "raw_tla": null,
+  "status": "success"
+}

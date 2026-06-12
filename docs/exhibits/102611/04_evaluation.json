@@ -1,0 +1,120 @@
+{
+  "status": "success",
+  "vector_disagreement": [
+    {
+      "vector": 4,
+      "port": "product",
+      "agent1": 0,
+      "spec": 12
+    },
+    {
+      "vector": 5,
+      "port": "product",
+      "agent1": 0,
+      "spec": 12
+    },
+    {
+      "vector": 6,
+      "port": "product",
+      "agent1": 0,
+      "spec": 12
+    },
+    {
+      "vector": 7,
+      "port": "product",
+      "agent1": 0,
+      "spec": 12
+    },
+    {
+      "vector": 8,
+      "port": "product",
+      "agent1": 0,
+      "spec": 12
+    },
+    {
+      "vector": 13,
+      "port": "product",
+      "agent1": 0,
+      "spec": 7
+    },
+    {
+      "vector": 14,
+      "port": "product",
+      "agent1": 0,
+      "spec": 21
+    },
+    {
+      "vector": 15,
+      "port": "product",
+      "agent1": 0,
+      "spec": 49
+    },
+    {
+      "vector": 16,
+      "port": "product",
+      "agent1": 0,
+      "spec": 49
+    },
+    {
+      "vector": 17,
+      "port": "product",
+      "agent1": 0,
+      "spec": 49
+    },
+    {
+      "vector": 18,
+      "port": "product",
+      "agent1": 0,
+      "spec": 49
+    },
+    {
+      "vector": 19,
+      "port": "product",
+      "agent1": 0,
+      "spec": 49
+    },
+    {
+      "vector": 23,
+      "port": "product",
+      "agent1": 0,
+      "spec": 255
+    },
+    {
+      "vector": 24,
+      "port": "product",
+      "agent1": 0,
+      "spec": 765
+    },
+    {
+      "vector": 25,
+      "port": "product",
+      "agent1": 0,
+      "spec": 1785
+    },
+    {
+      "vector": 26,
+      "port": "product",
+      "agent1": 0,
+      "spec": 3825
+    },
+    {
+      "vector": 27,
+      "port": "product",
+      "agent1": 0,
+      "spec": 7905
+    },
+    {
+      "vector": 28,
+      "port": "product",
+      "agent1": 0,
+      "spec": 16065
+    },
+    {
+      "vector": 29,
+      "port": "product",
+      "agent1": 0,
+      "spec": 32385
+    }
+  ],
+  "vector_check_note": "cocotb passed against spec-derived expecteds, but Agent 1's golden vectors disagree with the spec at the listed vectors \u2014 either an Agent-1 vector error (a false red avoided) or a spec/intent bug. Review 02_vector_check.json."
+}

@@ -1,0 +1,7 @@
+{
+  "status": "success",
+  "cycles": 2000,
+  "seed": 3318498218,
+  "note": "RTL matched the spec-derived expecteds on every random cycle (X outputs are don't-asserts).",
+  "duration_s": 4.834
+}
