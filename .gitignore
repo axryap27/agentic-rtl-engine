@@ -10,6 +10,7 @@ pipeline/refinement/_rtlcore*.so
 compile_commands.json
 docs/TLA_specs.png
 docs/system_architecture.png
+submission
 
 # Local environment / credentials — NEVER commit
 .env
