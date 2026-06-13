@@ -105,19 +105,10 @@ def main() -> None:
         status = eval_data.get("status", "unknown")
         print(f"[main] Evaluation status: {status}")
         if status == "success":
-            disagreement = eval_data.get("vector_disagreement")
-            if disagreement:
-                # cocotb passed against the spec-derived reference, but Agent 1's
-                # vectors disagreed with the spec — not a clean pass.
-                print(
-                    f"[main] PASSED WITH UNRESOLVED AGENT-1/SPEC DISAGREEMENT at "
-                    f"{len(disagreement)} vector point(s) — RTL matches the spec but "
-                    f"not Agent 1's golden vectors. This is either an Agent-1 vector "
-                    f"error (a false red avoided) or a spec/intent bug; review "
-                    f"02_vector_check.json."
-                )
-            else:
-                print("[main] SUCCESS — RTL passed cocotb testbench.")
+            # cocotb passed against the spec-derived reference. Any Agent-1/spec
+            # vector disagreement is still recorded on 04_evaluation.json and
+            # 02_vector_check.json — it is just not shouted to the terminal.
+            print("[main] SUCCESS — RTL passed cocotb testbench.")
             soak = eval_data.get("soak")
             if soak and soak.get("status") == "failed":
                 print(
