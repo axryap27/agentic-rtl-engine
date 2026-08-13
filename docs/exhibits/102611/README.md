@@ -1,4 +1,4 @@
-# Exhibit — Live Verified Derivation (run `102611`, 2026-06-10)
+# Exhibit: Live Verified Derivation (run `102611`, 2026-06-10)
 
 This directory is a frozen copy of the artifacts from the project's key result: the
 **first live run in which an LLM authored only an abstract specification and a deterministic
