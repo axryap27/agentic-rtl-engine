@@ -233,4 +233,8 @@ The artifacts from run `102611` are committed verbatim as an inspectable exhibit
 
 ---
 
-Deeper design docs live in [`docs/`](docs/README.md) — start with [`docs/architecture.md`](docs/architecture.md) (full system) and [`docs/refinement.md`](docs/refinement.md) (the engine and rules). `CLAUDE.md` is the contributor contract.
+Deeper design docs live in [`docs/`](docs/README.md) — start with [`docs/architecture.md`](docs/architecture.md) (full system) and [`docs/refinement.md`](docs/refinement.md) (the engine and rules).
+
+Contributors: 
+
+
