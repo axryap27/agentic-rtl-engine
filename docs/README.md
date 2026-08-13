@@ -1,8 +1,8 @@
 # Documentation
 
-Design and reference documentation for the **Agentic RTL Engine** — a pipeline that
-turns a natural-language description of a digital circuit into synthesizable
-Verilog-2001, formally lowered through TLA+ and verified with cocotb.
+Design and reference documentation for the **Agentic RTL Engine**: a pipeline that
+turns a natural-language circuit description into synthesizable Verilog-2001,
+formally lowered through TLA+ and verified with cocotb.
 
 For a one-page project introduction and setup, start with the
 [root README](../README.md). For the contributor contract (artifact map, code

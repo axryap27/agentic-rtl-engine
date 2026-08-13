@@ -17,3 +17,6 @@ submission
 .env.local
 .env.*.local
 
+# Markdown files
+CLAUDE.md
+
