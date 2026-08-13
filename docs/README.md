@@ -23,17 +23,17 @@ style, retry protocol), see [`CLAUDE.md`](../CLAUDE.md).
 | Document | Covers |
 |---|---|
 | [architecture.md](architecture.md) | Pipeline stages, the artifact chain, the LangGraph control plane, the runtime-agent / deterministic split, and the four design invariants. |
-| [agents.md](agents.md) | The three runtime LLM agents — Agent 1, Agent 3 (five call types, tool use, budget guard), and the Diagnoser — plus the two LLM transports. |
-| [refinement.md](refinement.md) | The refinement engine, the eight rules — six Tier-1 plus the verified-derivation pair (LoopIntroduction, gated by the obligation kernel, and ScheduleHandshakeFSM) — the multi-pass template schedule, the correctness critic, backtracking, and the replayable refinement chain. |
+| [agents.md](agents.md) | The three runtime LLM agents: Agent 1, Agent 3 (five call types, tool use, budget guard), and the Diagnoser. Plus the two LLM transports. |
+| [refinement.md](refinement.md) | The refinement engine and its eight rules (six Tier-1 plus the verified-derivation pair: LoopIntroduction, gated by the obligation kernel, and ScheduleHandshakeFSM), the multi-pass template schedule, the correctness critic, backtracking, and the replayable refinement chain. |
 | [compilers.md](compilers.md) | Compiler 1 (FormalSpec → TLA+), Compiler 2 (RTL-style TLA+ → Verilog-2001), the bridge between them, port/width inference, and the Verilog-2001 banlist. |
-| [verification.md](verification.md) | The deterministic cocotb testbench generator and runner, the spec-derived golden-vector pre-flight (spec simulator + vector cross-check), the post-pass spec-vs-RTL soak, and the test suite (deterministic vs. live). |
-| [core/README.md](../core/README.md) | The optional native verification core (C++17 / CMake / pybind11): exact mirrors of the expression evaluator, obligation kernel, and spec-sim cycle loop — identical verdicts and rows to the pure-Python fallback, selected via `OBLIGATIONS_BACKEND` / `SPECSIM_BACKEND`. |
+| [verification.md](verification.md) | The deterministic cocotb testbench generator and runner, the spec-derived golden-vector pre-flight (spec simulator, vector cross-check), the post-pass spec-vs-RTL soak, and the test suite (deterministic vs. live). |
+| [core/README.md](../core/README.md) | The optional native verification core (C++17, CMake, pybind11): exact mirrors of the expression evaluator, obligation kernel, and spec-sim cycle loop, with verdicts and rows identical to the pure-Python fallback. Selected via `OBLIGATIONS_BACKEND` / `SPECSIM_BACKEND`. |
 | [background.md](background.md) | Why formal methods, the stepwise-refinement idea, the refinement-calculus rule tables, and references. |
 
 ## Conventions
 
-- Code is the source of truth. These docs describe what the pipeline **does today**;
-  where a doc and the code disagree, the code wins — please fix the doc.
+- Code is the source of truth. These docs describe what the pipeline **does today**.
+  Where a doc and the code disagree, the code wins: please fix the doc.
 - "Agent" always means a **runtime** LLM call inside the pipeline (Agent 1, Agent 3,
   Diagnoser). Everything else under `pipeline/` is deterministic Python.
 - Verilog output is **Verilog-2001 only** (see the banlist in [compilers.md](compilers.md)).

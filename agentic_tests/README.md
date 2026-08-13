@@ -1,4 +1,4 @@
-# agentic_tests — live LLM test suite
+# agentic_tests: live LLM test suite
 
 These tests make **real API calls and cost money**. They are kept separate from
 `tests/` (which is fully deterministic and free) and are **off by default**.
